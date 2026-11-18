@@ -21,6 +21,14 @@ line 'Architettura' "$(dpkg --print-architecture)"
 line 'Kernel' "$(uname -r)"
 expect_active tailscaled.service
 expect_active tailscale-panel.socket
+# Il pannello e' attivato dalla socket: dopo un riavvio parte alla prima connessione. Lo
+# "svegliamo" prima di controllarlo, cosi' il risultato non dipende dal momento. Se non riesce
+# a partire, qui resta ERRORE (guasto vero).
+WAKE_IP=$(ip -4 -o addr show dev end0 scope global 2>/dev/null | awk '{split($4,a,"/"); if (a[1] !~ /^169\.254\./) {print a[1]; exit}}')
+if [ -n "$WAKE_IP" ]; then
+  curl --noproxy '*' -sk --connect-timeout 5 --max-time 10 -o /dev/null "https://$WAKE_IP:8443/login" 2>/dev/null || true
+  sleep 1
+fi
 expect_active tailscale-panel.service
 expect_active tailscale-panel-route-guard.service
 expect_active avahi-daemon.service
