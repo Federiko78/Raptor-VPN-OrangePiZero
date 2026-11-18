@@ -11,8 +11,8 @@ expect_active() {
   if [ "$status" = active ]; then line "$name" 'OK (active)'; else line "$name" "ERRORE ($status)"; ok=0; fi
 }
 line '===== FACTORY CHECK =====' ''
-if python3 -c 'import sys; sys.path.insert(0, "/opt/tailscale-panel"); from password_policy import password_error; assert password_error("Abcdefg1") is None; assert password_error("abcdefg1") is not None; assert password_error("Abcdefgh") is not None' 2>/dev/null; then
-  line 'Regole password v1.5.0' 'OK (8-128, maiuscola/minuscola/numero)'
+if python3 -c 'import sys; sys.path.insert(0, "/opt/tailscale-panel"); from password_policy import password_error; assert password_error("Abcdefghij12") is None; assert password_error("abcdefghij12") is not None; assert password_error("Abcdefgh1") is not None' 2>/dev/null; then
+  line 'Regole password v1.5.0' 'OK (12-128, maiuscola/minuscola/numero)'
 else
   line 'Regole password v1.5.0' 'ERRORE: modulo non presente o policy incoerente'; ok=0
 fi
@@ -33,6 +33,12 @@ if [ "$(systemctl show tailscale-panel.service -p ReadWritePaths --value 2>/dev/
   line 'Fix cambio password' 'OK'
 else
   line 'Fix cambio password' 'ERRORE: ReadWritePaths non impostato'; ok=0
+fi
+if [ "$(systemctl show tailscale-panel.service -p MemoryMax --value 2>/dev/null)" = 167772160 ] && \
+   [ "$(systemctl show tailscale-panel.service -p LockPersonality --value 2>/dev/null)" = yes ]; then
+  line 'Hardening unit systemd' 'OK (MemoryMax, LockPersonality)'
+else
+  line 'Hardening unit systemd' 'ERRORE: unit non aggiornata (rilanciare install_tailscale_panel.sh)'; ok=0
 fi
 if [ -s /etc/tailscale-panel/auth.json ] && \
    [ "$(stat -c '%a' /etc/tailscale-panel/auth.json 2>/dev/null)" = 600 ]; then

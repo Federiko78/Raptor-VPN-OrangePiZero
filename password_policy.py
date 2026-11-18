@@ -12,14 +12,21 @@ import subprocess
 import sys
 
 
-POLICY_DESCRIPTION = ('Da 8 a 128 caratteri, con almeno una lettera maiuscola, '
-                      'una minuscola e un numero. I simboli sono facoltativi.')
+MIN_LENGTH = 12
+MAX_LENGTH = 128
+
+POLICY_DESCRIPTION = ('Da %d a %d caratteri, con almeno una lettera maiuscola, '
+                      'una minuscola e un numero. I simboli sono facoltativi.' % (MIN_LENGTH, MAX_LENGTH))
 
 
 def password_error(password):
-    """Return Italian rejection message, or None when acceptable."""
-    if not isinstance(password, str) or len(password) < 8 or len(password) > 128:
-        return 'La password deve contenere da 8 a 128 caratteri.'
+    """Return Italian rejection message, or None when acceptable.
+
+    The policy applies only when a password is set or changed: an existing
+    shorter password keeps working until it is changed.
+    """
+    if not isinstance(password, str) or len(password) < MIN_LENGTH or len(password) > MAX_LENGTH:
+        return 'La password deve contenere da %d a %d caratteri.' % (MIN_LENGTH, MAX_LENGTH)
     if len(password.encode('utf-8')) > 256:
         return 'La password supera il limite di 256 byte UTF-8.'
     if password != password.strip() or any(ord(c) < 32 or ord(c) == 127 for c in password):

@@ -260,6 +260,17 @@ ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
+# Hardening aggiuntivo. NoNewPrivileges NON va impostato: il servizio avvia gli
+# helper root tramite sudo (setuid) e verrebbe bloccato. RestrictAddressFamilies
+# e' omesso di proposito: arp-scan usa socket AF_PACKET.
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+MemoryMax=160M
+TasksMax=96
 
 [Install]
 WantedBy=multi-user.target

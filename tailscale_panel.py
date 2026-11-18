@@ -33,6 +33,14 @@ LAN_DEV = os.environ.get('PANEL_LAN_DEV', 'end0')
 SESSIONS = {}
 FAILURES = {}
 LOCK = threading.Lock()
+# Limiti di robustezza: la scheda ha circa 512 MB di RAM ed e' esposta alla LAN del cliente.
+MAX_CONNECTIONS = 24         # connessioni simultanee; oltre, la connessione viene chiusa subito
+HANDSHAKE_TIMEOUT = 10       # secondi concessi per completare l'handshake TLS
+REQUEST_DEADLINE = 120       # durata massima di una connessione (anti slowloris)
+FAILURE_WINDOW = 900         # finestra di conteggio dei login falliti (15 minuti)
+LOGIN_FAILURES_PER_IP = 5
+LOGIN_FAILURES_GLOBAL = 20   # tutti gli IP insieme: frena il brute force da piu' indirizzi
+HASH_SLOTS = threading.Semaphore(2)  # al massimo 2 PBKDF2 in parallelo, FUORI dal LOCK globale
 DEFAULTS = {'subnets':'', 'advertise':False, 'mode':'off', 'selected_hosts':[],
             'snat':True, 'accept_routes':False, 'accept_dns':True, 'auto_update':False}
 
@@ -336,9 +344,9 @@ DASH = '''<main><header class="head"><div class="logo"><div class="emblem">TS</d
 <p>Modifica la password di accesso alla Web UI. La password attuale è obbligatoria. Dopo il cambio tutte le sessioni aperte (anche su altri dispositivi) vengono chiuse e dovrai effettuare nuovamente l’accesso.</p>
 <form id="passwordForm" autocomplete="on"><div class="formgrid">
 <div class="field"><label for="oldPassword">Password attuale</label><input id="oldPassword" type="password" autocomplete="current-password" required></div>
-<div class="field"><label for="newPassword">Nuova password</label><input id="newPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div>
-<div class="field"><label for="repeatPassword">Conferma nuova password</label><input id="repeatPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div>
-</div><div class="passwordinfo">Minimo 8 caratteri, con almeno una maiuscola, una minuscola e un numero. Simboli facoltativi. È consigliata una password lunga e univoca.</div>
+<div class="field"><label for="newPassword">Nuova password</label><input id="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+<div class="field"><label for="repeatPassword">Conferma nuova password</label><input id="repeatPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+</div><div class="passwordinfo">Minimo 12 caratteri, con almeno una maiuscola, una minuscola e un numero. Simboli facoltativi. È consigliata una password lunga e univoca.</div>
 <div class="footer"><button class="action" id="changePassword" type="submit">Cambia password</button><span id="passwordMessage" role="status"></span></div>
 </form></section></main>
 <script>
@@ -484,7 +492,7 @@ $('passwordForm').addEventListener('submit',async e=>{
  const message=$('passwordMessage');
  message.className='';
  if(newPassword!==confirmPassword){message.className='err';message.textContent='Le nuove password non corrispondono.';return;}
- if(newPassword.length<8||newPassword.length>128||!/[A-Z]/.test(newPassword)||!/[a-z]/.test(newPassword)||!/[0-9]/.test(newPassword)){message.className='err';message.textContent='Usa 8-128 caratteri con una maiuscola, una minuscola e un numero.';return;}
+ if(newPassword.length<12||newPassword.length>128||!/[A-Z]/.test(newPassword)||!/[a-z]/.test(newPassword)||!/[0-9]/.test(newPassword)){message.className='err';message.textContent='Usa 12-128 caratteri con una maiuscola, una minuscola e un numero.';return;}
  if(!window.confirm('Confermi il cambio della password? Tutte le sessioni verranno disconnesse.'))return;
  $('changePassword').disabled=true;
  try{
@@ -501,8 +509,70 @@ refresh();
 </script>'''
 
 
+def _abort_connection(sock):
+    """Chiude una connessione che ha superato REQUEST_DEADLINE."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def _purge_expired(now):
+    """Elimina sessioni scadute e login falliti fuori finestra. Chiamare con LOCK preso."""
+    cutoff = now - FAILURE_WINDOW
+    for ip in list(FAILURES):
+        FAILURES[ip] = [t for t in FAILURES[ip] if t > cutoff]
+        if not FAILURES[ip]:
+            del FAILURES[ip]
+    for key in [k for k, s in SESSIONS.items() if s['expires'] <= now]:
+        del SESSIONS[key]
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 16
+    _slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address):
+        # Oltre il limite la connessione viene chiusa subito: nessun thread in piu'.
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def finish_request(self, request, client_address):
+        # L'handshake TLS si fa QUI, nel thread della richiesta e con un timeout.
+        # Se lo facesse accept() (do_handshake_on_connect=True) una sola connessione
+        # TCP muta bloccherebbe l'intero pannello a tempo indeterminato.
+        if hasattr(request, 'do_handshake'):
+            try:
+                request.settimeout(HANDSHAKE_TIMEOUT)
+                request.do_handshake()
+            except OSError:  # include ssl.SSLError e timeout
+                return
+        timer = threading.Timer(REQUEST_DEADLINE, _abort_connection, (request,))
+        timer.daemon = True
+        timer.start()
+        try:
+            self.RequestHandlerClass(request, client_address, self)
+        finally:
+            timer.cancel()
+
+    def handle_error(self, request, client_address):
+        # Client scomparsi, reset e timeout non sono errori del pannello: niente rumore nel journal.
+        if isinstance(sys.exc_info()[1], OSError):
+            return
+        super().handle_error(request, client_address)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -582,29 +652,34 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             if path == '/login':
+                client_ip = self.client_address[0]
                 with LOCK:
-                    failures = [x for x in FAILURES.get(self.client_address[0], []) if x > time.time()-900]
-                    FAILURES[self.client_address[0]] = failures
-                    limited = len(failures) >= 5
+                    _purge_expired(time.time())
+                    limited = (len(FAILURES.get(client_ip, [])) >= LOGIN_FAILURES_PER_IP or
+                               sum(len(v) for v in FAILURES.values()) >= LOGIN_FAILURES_GLOBAL)
                 if limited:
                     return self._send(429, page(LOGIN + '<p>Troppi tentativi. Riprova più tardi.</p>'))
                 form = parse_qs(body.decode('utf-8'))
                 password = (form.get('password') or [''])[0]
+                # PBKDF2 (220.000 iterazioni) e' lento su Cortex-A7: va eseguito FUORI dal
+                # LOCK globale, altrimenti ogni login blocca tutte le altre richieste.
+                current_version = password_version()
+                with HASH_SLOTS:
+                    valid = bool(current_version) and verify_password(password)
+                authenticated = False
                 with LOCK:
-                    current_version = password_version()
-                    authenticated = bool(current_version and verify_password(password) and
-                                         hmac.compare_digest(current_version, password_version() or b''))
-                    if authenticated:
+                    if valid and hmac.compare_digest(current_version, password_version() or b''):
                         token = secrets.token_urlsafe(32)
                         session = {'csrf':secrets.token_urlsafe(32), 'expires':time.time()+8*3600,
                                    'auth_version':current_version, 'password_attempts':[]}
                         SESSIONS[token] = session
-                        FAILURES.pop(self.client_address[0], None)
+                        FAILURES.pop(client_ip, None)
+                        authenticated = True
+                    else:
+                        FAILURES.setdefault(client_ip, []).append(time.time())
                 if authenticated:
                     cookie = 'tspanel=%s; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict' % token
                     return self._send(303, b'', headers={'Location':'/', 'Set-Cookie':cookie})
-                with LOCK:
-                    FAILURES.setdefault(self.client_address[0], []).append(time.time())
                 return self._send(401, page(LOGIN + '<p class="err">Password non valida.</p>'))
             session = self._session()
             if not session:
@@ -643,9 +718,17 @@ class Handler(BaseHTTPRequestHandler):
                     session['password_attempts'] = attempts
                     if len(attempts) >= 5:
                         return self._json(429, {'error':'Troppi tentativi. Riprova fra 15 minuti.'})
-                    if not verify_password(old):
+                # Come per il login: l'hash lento si calcola fuori dal LOCK globale.
+                version_before = password_version()
+                with HASH_SLOTS:
+                    old_is_valid = verify_password(old)
+                with LOCK:
+                    now = time.time()
+                    if not old_is_valid:
                         session['password_attempts'].append(now)
                         return self._json(403, {'error':'Password attuale non corretta.'})
+                    if version_before is None or not hmac.compare_digest(version_before, password_version() or b''):
+                        return self._json(409, {'error':'La password è stata modificata nel frattempo: accedi di nuovo.'})
                     if hmac.compare_digest(old.encode('utf-8'), new.encode('utf-8')):
                         raise ValueError('La nuova password deve essere diversa da quella attuale.')
                     # Write first; revoke all sessions only if the new hash is saved.
@@ -735,7 +818,7 @@ def main():
             sys.exit('Serve un terminale interattivo SSH (TTY) per impostare la password.')
         for attempt in range(3):
             try:
-                password = getpass.getpass('Nuova password Web UI (minimo 8; maiuscola, minuscola e numero): ')
+                password = getpass.getpass('Nuova password Web UI (minimo 12; maiuscola, minuscola e numero): ')
                 confirmation = getpass.getpass('Conferma password Web UI: ')
             except (EOFError, KeyboardInterrupt):
                 sys.exit('\nImpostazione password annullata, nessuna credenziale modificata.')
@@ -789,7 +872,8 @@ def main():
     if hasattr(ssl, 'TLSVersion'):
         context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=CERT_PATH, keyfile=KEY_PATH)
-    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    # L'handshake NON si fa in accept(): lo esegue Server.finish_request con un timeout.
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
     print('Tailscale Panel HTTPS socket Ethernet %s:%s pronto' % (LAN_DEV, PORT), flush=True)
     httpd.serve_forever()
 

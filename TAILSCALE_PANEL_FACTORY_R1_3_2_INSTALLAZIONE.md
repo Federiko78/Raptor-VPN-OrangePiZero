@@ -29,7 +29,7 @@ La Factory **non include** alcun indirizzo IP di prova, password esistente, prof
 
 - Repository ufficiale **Tailscale Stable** per Debian 13 e servizio `tailscaled` abilitato all'avvio.
 - Server Python HTTPS leggero con socket systemd legato all'interfaccia Ethernet, non all'indirizzo DHCP.
-- Accesso amministrativo con password (8–128 caratteri, almeno una maiuscola, una minuscola e una cifra) e cambio password dalla GUI.
+- Accesso amministrativo con password (12–128 caratteri, almeno una maiuscola, una minuscola e una cifra) e cambio password dalla GUI.
 - Scansione della sola LAN Ethernet (`arp-scan`); ricerca hostnames DNS inverso/mDNS ove possibile.
 - Router IPv4: rete completa, singoli host `/32` o OFF; SNAT, DNS Tailscale, rotte remote e auto-update configurabili.
 - Guard IPv4 tramite `iptables -t mangle` **prima** delle regole Tailscale in `filter/FORWARD`; guard IPv6 di blocco.
@@ -65,7 +65,7 @@ L'installer esegue i controlli preliminari **prima di alterare il progetto**; ar
 Durante l'installazione:
 
 1. Puoi scegliere se cambiare nuovamente la password Linux `root` (facoltativo, indipendente dalla Web UI).
-2. Imposti e confermi una nuova password Web UI (minimo 8 caratteri, maiuscola, minuscola e numero).
+2. Imposti e confermi una nuova password Web UI (minimo 12 caratteri, maiuscola, minuscola e numero).
 3. L'installer configura il guard in modalità **OFF** e i servizi. Non effettua `tailscale up` e non pubblica alcuna rotta.
 4. La verifica finale include il guard IPv4 in `mangle`, il blocco IPv6 e la policy vuota.
 

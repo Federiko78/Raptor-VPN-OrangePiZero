@@ -130,7 +130,8 @@ class AppTests(unittest.TestCase):
         self.assertIn("routeSelected",p.DASH)
     def test_password_behavior_retained(self):
         from sys import path
-        self.assertIsNone(p.password_error('Abcdefg1'))
-        self.assertIsNotNone(p.password_error('abcdefg1'))
+        self.assertIsNone(p.password_error('Abcdefghij12'))
+        self.assertIsNotNone(p.password_error('abcdefghij12'))   # manca la maiuscola
+        self.assertIsNotNone(p.password_error('Abcdefg1'))       # troppo corta (minimo 12)
 
 if __name__=='__main__': unittest.main(verbosity=2)

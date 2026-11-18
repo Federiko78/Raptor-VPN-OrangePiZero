@@ -76,7 +76,7 @@ printf 'Vuoi cambiare nuovamente la password Linux dell’utente root? [s/N]: '
 IFS= read -r CONFIRM_ROOT || die 'Impossibile leggere la scelta dal terminale'
 case "$CONFIRM_ROOT" in
   s|S|si|SI|Si|sI|y|Y|yes|YES)
-    echo 'Inserire due volte la nuova password Linux (minimo 8, maiuscola, minuscola e numero).'
+    echo 'Inserire due volte la nuova password Linux (minimo 12, maiuscola, minuscola e numero).'
     python3 "$BASE/password_policy.py" --set-linux-root || die 'Cambio password Linux non riuscito: installazione interrotta'
     ;;
   ''|n|N|no|NO|No)
@@ -87,7 +87,7 @@ case "$CONFIRM_ROOT" in
     ;;
 esac
 printf '\n'
-echo 'Durante l’installazione verrà richiesta SEPARATAMENTE la password della Web UI (8-128 caratteri; maiuscola, minuscola e numero).'
+echo 'Durante l’installazione verrà richiesta SEPARATAMENTE la password della Web UI (12-128 caratteri; maiuscola, minuscola e numero).'
 
 say 'Installazione dipendenze Debian'
 export DEBIAN_FRONTEND=noninteractive
