@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# Backup e temporanei generati dagli installer
+*.bak-*
+*.tmp
+
+# SEGRETI E STATO: non vanno MAI committati
+auth.json
+*.pem
+*.key
+tailscaled.state
+settings.json
+policy.json
+.env
+.env.*
+
+# Report di audit e archivi (contengono IP, nomi di host e identita' tailnet)
+audit-*/
+report.txt
+*.tar.gz
+*.zip
