@@ -32,6 +32,7 @@ LAN_CONF = pathlib.Path('/etc/tailscale-panel-lan.conf')
 RUN_DIR = pathlib.Path('/run/raptor-ap')
 PREFIX = 'Raptor VPN - '
 NO_IP = 'nessun IP'
+IFACE_WAIT = 60   # secondi di attesa massima del driver Wi-Fi dopo aver ottenuto l'IP
 DEFAULTS = {'ENABLED': 1, 'DURATION': 60, 'CHANNEL': 6, 'IFACE': 'wlan0', 'WAIT_IP': 90}
 STOP = threading.Event()
 
@@ -149,6 +150,17 @@ def wait_for_ip(dev, seconds):
         STOP.wait(2)
 
 
+def wait_for_iface(iface, seconds):
+    """All'avvio il driver Wi-Fi (xradio) puo' creare wlan0 dopo di noi: aspettiamo."""
+    path = pathlib.Path('/sys/class/net/' + iface)
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        if STOP.is_set() or time.monotonic() >= deadline:
+            return False
+        STOP.wait(1)
+    return True
+
+
 def free_wifi(iface):
     """Ferma wpa_supplicant (non serve: la scheda usa solo Ethernet) e sblocca la radio."""
     for unit in ('wpa_supplicant.service', 'wpa_supplicant@%s.service' % iface):
@@ -159,15 +171,15 @@ def free_wifi(iface):
 
 def run_ap(conf):
     iface = conf['IFACE']
-    if not pathlib.Path('/sys/class/net/' + iface).exists():
-        log('interfaccia %s assente: niente AP' % iface)
-        return 0
     hostapd = shutil.which('hostapd')
     if not hostapd:
         log('hostapd non installato: niente AP')
         return 0
     ip = wait_for_ip(lan_device(), conf['WAIT_IP'])
     if STOP.is_set():
+        return 0
+    if not wait_for_iface(iface, IFACE_WAIT):
+        log('interfaccia %s assente dopo %d s: niente AP (driver Wi-Fi non caricato?)' % (iface, IFACE_WAIT))
         return 0
     ssid = make_ssid(ip)
     log('IP %s -> rete "%s" per %d s' % (ip or 'assente', ssid, conf['DURATION']))

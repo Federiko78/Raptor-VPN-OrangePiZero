@@ -139,10 +139,14 @@ WAIT_IP=90     # secondi massimi di attesa dell'IP prima di annunciare "nessun I
 EOF
     chmod 0644 "$AP_CONF"
   fi
+  # Mai scrivere "attraverso" una unit mascherata (collegamento a /dev/null) o rimasta vuota:
+  # la si toglie prima e si ricrea da zero.
+  systemctl unmask raptor-ap.service >/dev/null 2>&1 || true
+  rm -f "$AP_UNIT"
   cat > "$AP_UNIT" <<EOF
 [Unit]
 Description=Raptor VPN - Wi-Fi temporaneo che annuncia l'indirizzo IP
-After=systemd-networkd.service
+After=systemd-networkd.service wpa_supplicant.service
 
 [Service]
 Type=simple
@@ -161,8 +165,10 @@ ProtectControlGroups=yes
 WantedBy=multi-user.target
 EOF
   chmod 0644 "$AP_UNIT"
+  [ -s "$AP_UNIT" ] && [ ! -L "$AP_UNIT" ] || die "Unit $AP_UNIT non scritta correttamente"
   systemctl daemon-reload
   systemctl enable raptor-ap.service >/dev/null 2>&1 || die 'Impossibile abilitare raptor-ap.service'
+  [ "$(systemctl is-enabled raptor-ap.service 2>/dev/null || true)" = enabled ] || die 'raptor-ap.service non risulta abilitato (mascherato?): controllare systemctl status raptor-ap'
   systemctl restart --no-block raptor-ap.service || true
   echo 'Wi-Fi annuncio-IP installato: parte ad ogni avvio, dopo il DHCP, per circa 1 minuto.'
   echo 'Prova subito: sul telefono cerca la rete "Raptor VPN - <IP>" (per ~1 minuto).'
@@ -175,4 +181,6 @@ elif [ "$AP" = off ]; then
     echo 'Wi-Fi annuncio-IP: non installato.'
   fi
 fi
+# Scrive tutto sulla microSD: se si stacca l'alimentazione subito dopo, i file non restano vuoti.
+sync
 printf '\nFatto.\n'

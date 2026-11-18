@@ -160,11 +160,35 @@ class RunTests(unittest.TestCase):
         self.assertIn('ssid=Raptor VPN - nessun IP', self.written['conf'])
 
     def test_missing_interface_or_hostapd_does_nothing(self):
-        with patch.object(ap.pathlib.Path, 'exists', lambda self_: False):
+        with patch.object(ap, 'IFACE_WAIT', 0), patch.object(ap.pathlib.Path, 'exists', lambda self_: False):
             self.assertEqual(ap.run_ap(self.conf), 0)
         self.assertEqual(self.commands, [])
         with patch.object(ap.shutil, 'which', return_value=None):
             self.assertEqual(ap.run_ap(self.conf), 0)
+
+    def test_interface_that_appears_late_at_boot_still_gets_the_ap(self):
+        # Regressione: all'avvio wlan0 puo' comparire dopo il servizio. Prima si usciva subito.
+        seen = {'exists': 0, 'waits': 0}
+
+        def late(self_):
+            if str(self_) == '/sys/class/net/wlan0':
+                seen['exists'] += 1
+                return seen['exists'] > 3          # assente per le prime 3 verifiche
+            return pathlib.Path.is_file(self_)
+
+        def wait(timeout=None):
+            seen['waits'] += 1
+            if seen['waits'] >= 6:                 # dopo l'attesa dell'interfaccia, chiude l'AP
+                ap.STOP.set()
+        with patch.object(ap.pathlib.Path, 'exists', late), patch.object(ap.STOP, 'wait', side_effect=wait):
+            ap.run_ap(dict(self.conf, DURATION=20))
+        self.assertGreaterEqual(seen['exists'], 4)
+        self.assertIn('ssid=Raptor VPN - 192.168.1.57', self.written['conf'])
+
+    def test_wait_for_iface_gives_up(self):
+        with patch.object(ap.pathlib.Path, 'exists', lambda self_: False), \
+             patch.object(ap.STOP, 'wait', side_effect=lambda t=None: None):
+            self.assertFalse(ap.wait_for_iface('wlan0', 0))
 
     def test_disabled_by_config(self):
         with patch.object(ap, 'load_conf', return_value=dict(ap.DEFAULTS, ENABLED=0)), \

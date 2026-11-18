@@ -153,6 +153,10 @@ say 'Accesso di servizio: IP di recupero e Wi-Fi che annuncia l’IP'
 # Non fatale: il pannello e' gia' installato e funzionante; si puo' rilanciare a parte.
 sh "$BASE/install_access.sh" || printf 'AVVISO: accesso di servizio non completato. Rilanciare: sh install_access.sh\n' >&2
 
+# Scrive tutto sulla microSD: i clienti staccano la presa senza spegnere, e un file nuovo non
+# ancora scritto su disco resterebbe vuoto.
+sync
+
 say 'Verifica finale Factory'
 if ! sh "$BASE/check_installation.sh" --fresh; then
   sh "$BASE/restore_panel.sh" "$BACKUP_DIR" || true
