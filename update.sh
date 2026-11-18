@@ -18,7 +18,14 @@ cd "$BASE"
 [ -x /usr/local/libexec/tailscale-panel-net-helper ] || die 'Pannello non installato: usare install_factory.sh'
 
 say 'Download'
-git pull --ff-only || die 'git pull non riuscito (modifiche locali o rete?).'
+# Niente "git pull": la copia e' superficiale (--depth 1) e il ramo puo' non avere un ramo remoto associato
+# (e' cosi' dopo "git checkout -B ramo FETCH_HEAD"). Si scarica l'ultimo commit del ramo e si passa a quello.
+BRANCH=$(git symbolic-ref --short -q HEAD || true)
+case "$BRANCH" in ''|*[!A-Za-z0-9._/-]*) die 'Nessun ramo attivo: rifare il download con bootstrap.sh' ;; esac
+[ -z "$(git status --porcelain --untracked-files=no)" ] || die 'File del progetto modificati a mano: annullare con "git checkout -- ." oppure rifare il download con bootstrap.sh'
+git fetch --depth 1 origin "$BRANCH" || die "Download del ramo $BRANCH non riuscito (rete? il ramo esiste su GitHub?)."
+git checkout -q -B "$BRANCH" FETCH_HEAD || die 'Aggiornamento dei file non riuscito.'
+echo "Versione: $(git log --oneline -1)"
 sha256sum -c SHA256SUMS >/dev/null || die 'Verifica SHA256 non superata: file danneggiati'
 
 say 'Pannello'

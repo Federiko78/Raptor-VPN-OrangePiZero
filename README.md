@@ -69,6 +69,7 @@ python3 test_ap.py           # Wi-Fi annuncio-IP
 python3 test_eventlog.py     # registro eventi (scrittore)
 python3 test_tsauth.py       # accesso Tailscale (programma root)
 python3 test_panel_account.py # accesso Tailscale (lato pannello)
+python3 test_update.py       # update.sh (come root)
 python3 test_panel_events.py # registro eventi (lettura nel pannello)
 sha256sum -c SHA256SUMS      # integrità del pacchetto (usata da install_factory.sh)
 ```
