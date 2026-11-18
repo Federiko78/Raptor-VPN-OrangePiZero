@@ -31,11 +31,20 @@ try {
     Write-Host "Rotta aggiunta. Controllo che la scheda risponda..."
     $open = Test-NetConnection -ComputerName $Ip -Port 8443 -WarningAction SilentlyContinue
     if ($open.TcpTestSucceeded) {
-        Write-Host "Risponde. Apro https://${Ip}:8443 (accetta l'avviso del certificato; serve la password)."
+        Write-Host "Pannello: risponde. Apro https://${Ip}:8443 (accetta l'avviso del certificato; serve la password)."
         Start-Process "https://${Ip}:8443"
     } else {
-        Write-Host "Nessuna risposta su ${Ip}:8443. Controlli: stesso switch/LAN? cavo collegato? scheda accesa da piu' di 1 minuto?"
+        Write-Host "Pannello: nessuna risposta su ${Ip}:8443. Controlli: stesso switch/LAN? cavo collegato? scheda accesa da piu' di 1 minuto?"
     }
+    # SSH: stessa porta 22 del normale sshd. Raggiungibile solo se il firewall in ingresso la lascia
+    # passare dalla LAN (input_firewall.sh --ssh-lan on) e con la tua chiave (la password e' disattivata).
+    $ssh = Test-NetConnection -ComputerName $Ip -Port 22 -WarningAction SilentlyContinue
+    if ($ssh.TcpTestSucceeded) {
+        Write-Host "SSH: la porta 22 risponde. Finche' questa finestra resta aperta puoi collegarti con PuTTY o 'ssh utente@${Ip}'."
+    } else {
+        Write-Host "SSH: la porta 22 NON risponde su ${Ip}. Se il pannello risponde, di solito il firewall ha SSH dalla LAN spento (--ssh-lan off): in quel caso SSH e' raggiungibile solo via Tailscale."
+    }
+    Write-Host "La rotta esiste solo finche' non premi INVIO: PuTTY/ssh vanno usati PRIMA di chiudere."
     Read-Host "Premi INVIO per rimuovere la rotta"
 } finally {
     & route.exe delete $Ip | Out-Null

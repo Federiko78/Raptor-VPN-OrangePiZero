@@ -67,6 +67,38 @@ Limiti da conoscere:
 - Se hai attivato il firewall in ingresso (`hardening/input_firewall.sh`), la regola per la porta
   8443 su `end0` vale anche per l'IP di recupero: non serve altro.
 
+### SSH / PuTTY sull'IP di recupero
+
+L'IP di recupero è pensato per il **pannello** (HTTPS 8443). Anche SSH (porta 22) lo raggiunge, perché
+sshd ascolta su tutti gli indirizzi della scheda, ma **solo se si verificano tutte queste condizioni**:
+
+1. **Il PC ha la rotta verso l'indirizzo.** Senza, i pacchetti vanno al router, che li scarta: PuTTY resta
+   fermo fino al timeout. Con `recupero_windows.ps1` la rotta esiste **solo finché la finestra aspetta
+   INVIO**: lancia PuTTY/`ssh` prima di premere INVIO (lo script ora dice anche se la porta 22 risponde).
+2. **Il firewall in ingresso lascia passare SSH dalla LAN.** Con `input_firewall.sh --ssh-lan on` (predefinito)
+   sì; con `--ssh-lan off` (consigliato alla consegna) SSH resta raggiungibile solo via Tailscale, **anche**
+   sull'IP di recupero. È voluto: aprire SSH sul recupero allargherebbe l'esposizione.
+3. **Entri con la chiave.** `hardening/harden_ssh.sh` disattiva la password e ammette solo l'utente
+   amministratore: in PuTTY serve la chiave privata (.ppk) in *Connection → SSH → Auth → Credentials*.
+
+Come capire quale condizione manca (il pannello sull'IP di recupero funziona, SSH no?):
+
+```
+# sul PC Windows, PowerShell come amministratore, con la rotta attiva (finestra dello script aperta)
+Test-NetConnection 169.254.X.Y -Port 8443   # pannello
+Test-NetConnection 169.254.X.Y -Port 22     # SSH
+
+# sulla scheda (da Tailscale o console)
+ip -4 addr show dev end0                    # l'alias deve esserci
+sudo ss -tlnp | grep ':22 '                 # sshd in ascolto
+sudo cat /etc/raptor-input-guard.conf          # SSH_LAN=1 oppure 0
+sudo iptables -S RAPTOR_IN | grep 'dport 22'
+```
+
+- 8443 risponde e 22 no → firewall con SSH dalla LAN spento (condizione 2): usa Tailscale per SSH.
+- Nessuna delle due risponde → manca la rotta sul PC (condizione 1) o PC e scheda non sono sulla stessa LAN.
+- 22 risponde ma PuTTY rifiuta l'accesso → problema di chiave/utente (condizione 3), non di rete.
+
 Cambiare o togliere il valore (da SSH, come root):
 
 ```
