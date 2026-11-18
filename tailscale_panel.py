@@ -194,7 +194,7 @@ def lan_details():
                     continue
                 ip = addr.get('local','')
                 if ip.startswith('169.254.'):
-                    continue  # indirizzo di recupero (link-local): mai mostrato come IP LAN
+                    continue  # indirizzo link-local (169.254.x.x): non e' un IP della LAN
                 mask = addr.get('prefixlen', 24)
                 network = ipaddress.ip_network('%s/%s' % (ip,mask), strict=False)
                 if not isinstance(network, ipaddress.IPv4Network):

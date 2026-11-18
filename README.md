@@ -21,7 +21,7 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello (ultima scheda). Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
 - **Statistiche dei riavvii** in cima al pannello (oggi, settimana, mese, anno, con le mancanze di corrente) e contatori nella sezione Eventi.
 - **Due lingue**, inglese (predefinita) e italiano, scelte con il selettore EN | IT in alto: i testi stanno in `i18n/*.json`. Vedi [`LINGUE.md`](LINGUE.md).
-- **IP di recupero** `169.254.X.Y` scelto da te: raggiunge sempre il pannello dalla stessa LAN, anche con Tailscale spento o IP sconosciuto (la password resta obbligatoria). Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
+- **Wi-Fi che annuncia l'IP** (`Raptor VPN - <IP>`, non collegabile, circa 3 minuti dopo ogni avvio): per trovare la scheda in una rete che non conosci. Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Sistema operativo richiesto
 
@@ -41,7 +41,7 @@ Da root, in una sessione SSH con terminale, **un solo comando** (installa git e 
 curl -fsSL https://raw.githubusercontent.com/Federiko78/Raptor-VPN-OrangePiZero/main/bootstrap.sh | sh
 ```
 
-L'installer chiede la password del pannello (minimo 12 caratteri), l'**IP di recupero** e se attivare il **Wi-Fi che annuncia l'IP**; poi Tailscale si collega **dal pannello** (sezione *Account Tailscale*), senza comandi da SSH. Per provare un ramo diverso: `... | RAPTOR_BRANCH=nome-ramo sh`.
+L'installer chiede la password del pannello (minimo 12 caratteri) e se attivare il **Wi-Fi che annuncia l'IP**; poi Tailscale si collega **dal pannello** (sezione *Account Tailscale*), senza comandi da SSH. Per provare un ramo diverso: `... | RAPTOR_BRANCH=nome-ramo sh`.
 
 Se preferisci passo per passo:
 
@@ -52,7 +52,7 @@ cd Raptor-VPN-OrangePiZero
 sh ./install_factory.sh
 ```
 
-L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenziali, policy o servizi già presenti. Dettagli, verifiche e rollback in [`TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md`](TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md); IP di recupero e Wi-Fi in [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
+L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenziali, policy o servizi già presenti. Dettagli, verifiche e rollback in [`TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md`](TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md); Wi-Fi che annuncia l'IP in [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Sicurezza
 
@@ -66,7 +66,7 @@ L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenz
 ```sh
 python3 test_release.py      # test simulati, non toccano la rete
 python3 test_security.py     # server HTTPS reale su 127.0.0.1 (serve openssl)
-python3 test_access.py       # IP di recupero
+python3 test_access.py       # indirizzi link-local, pulizia del vecchio IP di recupero
 python3 test_ap.py           # Wi-Fi annuncio-IP
 python3 test_eventlog.py     # registro eventi (scrittore)
 python3 test_tsauth.py       # accesso Tailscale (programma root)

@@ -81,7 +81,7 @@ def lan_device():
 
 
 def pick_ip(addr_json):
-    """Primo IPv4 "vero" della porta: scarta loopback e 169.254.x.x (IP di recupero)."""
+    """Primo IPv4 "vero" della porta: scarta loopback e 169.254.x.x (link-local)."""
     try:
         interfaces = json.loads(addr_json)
     except (TypeError, ValueError):

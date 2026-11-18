@@ -27,7 +27,7 @@ main() {
   [ "$(id -u)" -eq 0 ] || die 'Eseguire come root.'
   case "$BRANCH" in ''|*[!A-Za-z0-9._/-]*) die "Nome ramo non valido: $BRANCH" ;; esac
 
-  # L'installer fa domande (password, IP di recupero): serve la tastiera anche se lo script
+  # L'installer fa domande (password, Wi-Fi che annuncia l'IP): serve la tastiera anche se lo script
   # arriva da una pipe.
   if [ ! -t 0 ]; then
     ( : < /dev/tty ) 2>/dev/null || die 'Serve una sessione interattiva (SSH con terminale).'

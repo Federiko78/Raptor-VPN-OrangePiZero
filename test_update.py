@@ -29,7 +29,15 @@ class UpdateTests(unittest.TestCase):
         # percorso dell'helper di rete: file finto dentro la prova
         (self.work / 'netstub').write_text('')
         os.chmod(self.work / 'netstub', 0o755)
-        (self.work / 'update.sh').write_text(text.replace('/usr/local/libexec/tailscale-panel-net-helper', str(self.root / 'pi' / 'netstub')))
+        # file e cartelle di sistema toccati dalla pulizia dell'IP di recupero: sostituiti da percorsi di prova
+        self.conf = self.root / 'raptor-recovery.conf'
+        self.netstate = self.root / 'netstate'
+        self.log = self.root / 'calls.log'
+        self.netstate.mkdir()
+        text = (text.replace('/usr/local/libexec/tailscale-panel-net-helper', str(self.root / 'pi' / 'netstub'))
+                    .replace('/etc/raptor-recovery.conf', str(self.conf))
+                    .replace('/var/lib/tailscale-panel-network', str(self.netstate)))
+        (self.work / 'update.sh').write_text(text)
         for name in STUBS:
             (self.work / name).write_text('echo "[%s eseguito]"\n' % name)
         self.release('v1', 'main')
@@ -100,6 +108,51 @@ class UpdateTests(unittest.TestCase):
         self.assertNotEqual(done.returncode, 0)
         self.assertIn('SHA256', done.stdout + done.stderr)
         self.assertNotIn('eseguito', done.stdout)
+
+    # --- pulizia dell'IP di recupero (funzione rimossa) sulle schede che lo avevano -------------
+
+    def stub_calls(self, net_exit=0):
+        """L'helper di rete e l'installer del pannello scrivono in un registro: si vede l'ORDINE delle chiamate."""
+        (self.work / 'netstub').write_text('#!/bin/sh\necho "helper $*" >> %s\nexit %d\n' % (self.log, net_exit))
+        (self.work / 'install_tailscale_panel.sh').write_text('echo "pannello installato" >> %s\n' % self.log)
+
+    def calls(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_old_recovery_ip_is_removed_before_the_new_panel_replaces_the_helper(self):
+        self.stub_calls()
+        self.conf.write_text('RECOVERY_IP=169.254.10.11\n')
+        (self.netstate / 'backup-recovery-1700000000.json').write_text('{}')
+        (self.netstate / 'pending.json').write_text('{}')
+        self.release('v2', 'main')
+        done = self.update()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.calls(), ['helper --set-recovery none', 'pannello installato'])
+        self.assertIn('IP di recupero rimosso', done.stdout)
+        # i vecchi salvataggi contengono l'indirizzo segreto: spariscono; il resto dello stato no
+        self.assertFalse(list(self.netstate.glob('backup-recovery-*.json')))
+        self.assertTrue((self.netstate / 'pending.json').exists())
+
+    def test_board_without_recovery_ip_does_not_call_the_helper(self):
+        self.stub_calls()
+        self.release('v2', 'main')
+        done = self.update()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.calls(), ['pannello installato'])
+        self.assertIn('Nessun IP di recupero da togliere', done.stdout)
+
+    def test_failed_cleanup_stops_before_the_panel_is_replaced(self):
+        # Con il vecchio helper ancora al suo posto si puo' riprovare; dopo la sostituzione no.
+        self.stub_calls(net_exit=1)
+        self.conf.write_text('RECOVERY_IP=169.254.10.11\n')
+        (self.netstate / 'backup-recovery-1700000000.json').write_text('{}')
+        self.release('v2', 'main')
+        done = self.update()
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('IP di recupero non rimosso', done.stdout + done.stderr)
+        self.assertEqual(self.calls(), ['helper --set-recovery none'])
+        self.assertTrue(self.conf.exists())
+        self.assertTrue(list(self.netstate.glob('backup-recovery-*.json')))
 
 
 if __name__ == '__main__':

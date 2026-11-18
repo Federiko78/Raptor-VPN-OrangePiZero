@@ -156,7 +156,7 @@ say 'Registro eventi (avvii, spegnimenti, mancanza di corrente)'
 # Non fatale, come l'accesso di servizio: si puo' rilanciare a parte.
 sh "$BASE/install_eventlog.sh" || printf 'AVVISO: registro eventi non installato. Rilanciare: sh install_eventlog.sh\n' >&2
 
-say 'Accesso di servizio: IP di recupero e Wi-Fi che annuncia l’IP'
+say 'Accesso di servizio: Wi-Fi che annuncia l’IP'
 # Non fatale: il pannello e' gia' installato e funzionante; si puo' rilanciare a parte.
 sh "$BASE/install_access.sh" || printf 'AVVISO: accesso di servizio non completato. Rilanciare: sh install_access.sh\n' >&2
 
@@ -179,7 +179,7 @@ printf '3) Apri https://IP-ETHERNET:8443 sul PC nella LAN.\n'
 printf '4) LAN OFF, nessun host scelto, nessuna rotta. Configura solo quando pronto.\n'
 printf '5) Prima di pubblicare subnet: regole tailnet + approvazione rotta.\n'
 printf '6) Non aprire TCP 8443 verso Internet.\n'
-printf '7) IP di recupero e Wi-Fi "Raptor VPN - <IP>": vedi ACCESSO_DI_SERVIZIO.md.\n'
+printf '7) Wi-Fi "Raptor VPN - <IP>": vedi ACCESSO_DI_SERVIZIO.md.\n'
 printf '8) Riavvii e mancanze di corrente: sezione Eventi del pannello (REGISTRO_EVENTI.md).\n'
 printf '9) Per aggiornare in futuro: cd %s && sh update.sh\n' "$BASE"
 printf '=====================================================\n'

@@ -34,7 +34,7 @@ Con la scheda collegata ci sono due pulsanti, che fanno cose diverse:
 - **Spegni Tailscale** (`tailscale down`): ferma la VPN ma la scheda resta nell'account. Le rotte pubblicate smettono di funzionare e la scheda non è più raggiungibile da remoto. Si riaccende con **Riattiva Tailscale**, senza un nuovo link o una nuova chiave.
 - **Scollega dall'account Tailscale** (`tailscale logout`): toglie la scheda dall'account. Per ricollegarla serve di nuovo un link o una chiave.
 
-Entrambi chiedono una conferma. La scheda resta sempre raggiungibile dalla LAN (e dall'IP di recupero), perché il pannello non passa da Tailscale.
+Entrambi chiedono una conferma. La scheda resta sempre raggiungibile dalla LAN, perché il pannello non passa da Tailscale.
 
 Con un nodo "taggato" i permessi li decide la policy (ACL/Grants) sul tag, non l'utente che lo ha creato: è la strada giusta per i clienti.
 Ricorda che le rotte `/32` pubblicate richiedono comunque l'approvazione nella console (o `autoApprovers` nella policy).

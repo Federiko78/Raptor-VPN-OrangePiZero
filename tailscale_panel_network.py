@@ -11,7 +11,6 @@ import json
 import os
 import pathlib
 import re
-import secrets
 import shutil
 import subprocess
 import sys
@@ -28,10 +27,6 @@ PENDING = STATE / 'pending.json'
 LOCK = pathlib.Path('/run/lock/tailscale-panel-network.lock')
 SELF = pathlib.Path('/usr/local/libexec/tailscale-panel-net-helper')
 WAIT_SECONDS = 150
-# Indirizzo di recupero scelto dall'installatore: alias link-local 169.254.X.Y/16 su end0.
-# Resta attivo in DHCP e in statico, anche con Tailscale spento o IP sconosciuto.
-RECOVERY_CONF = pathlib.Path('/etc/raptor-recovery.conf')
-RECOVERY_PREFIX = 16
 
 
 def shell(args, timeout=15):
@@ -114,29 +109,6 @@ def validate(body):
     return {'mode':'static','ip':str(address),'prefix':prefix,'gateway':str(gateway),'dns':dns}
 
 
-def valid_recovery(value):
-    """Solo 169.254.X.Y con X da 1 a 254 e Y da 1 a 254 (169.254.0.x e .255.x sono riservati)."""
-    try:
-        ip = ipaddress.IPv4Address(str(value).strip())
-    except ValueError:
-        raise ValueError('Invalid recovery address: use the format 169.254.X.Y.')
-    packed = ip.packed
-    if packed[0] != 169 or packed[1] != 254 or packed[2] in (0, 255) or packed[3] in (0, 255):
-        raise ValueError('The recovery address must be 169.254.X.Y with X and Y from 1 to 254.')
-    return str(ip)
-
-
-def recovery_ip():
-    """Indirizzo di recupero configurato, oppure None (file assente o non valido)."""
-    try:
-        for line in RECOVERY_CONF.read_text().splitlines():
-            if line.startswith('RECOVERY_IP='):
-                return valid_recovery(line.split('=', 1)[1])
-    except (OSError, ValueError):
-        pass
-    return None
-
-
 def known_default(content):
     """Fail closed if the supposed default file has unexpected settings."""
     s = content.decode('utf-8')
@@ -182,8 +154,6 @@ def get_current():
                 except (ValueError, TypeError):
                     pass
                 break
-    # Solo lo stato: il valore dell'indirizzo di recupero non esce mai dall'helper.
-    out['recovery_active'] = recovery_ip() is not None
     pending = read_pending()
     if pending:
         out['pending'] = {'id':pending['id'],'mode':pending['config']['mode'],
@@ -197,31 +167,11 @@ def render(config):
     output = ['# Managed by Tailscale Panel - do not edit manually', tag,
               'network:', '  version: 2', '  renderer: networkd', '  ethernets:',
               '    end0:', '      dhcp6: ' + ('true' if config['mode']=='dhcp' else 'false'), '      dhcp4: ' + ('true' if config['mode']=='dhcp' else 'false')]
-    addresses = []
     if config['mode'] == 'static':
-        addresses.append(config['ip'] + '/' + str(config['prefix']))
-    recovery = recovery_ip()
-    if recovery:
-        addresses.append(recovery + '/' + str(RECOVERY_PREFIX))
-    if addresses:
-        output += ['      addresses:'] + ['        - ' + a for a in addresses]
-    if config['mode'] == 'static':
+        output += ['      addresses:', '        - ' + config['ip'] + '/' + str(config['prefix'])]
         output += ['      routes:', '        - to: default', '          via: '+config['gateway'],
                    '      nameservers:', '        addresses: ['+', '.join(config['dns'])+']']
     return ('\n'.join(output)+'\n').encode()
-
-
-def saved_config():
-    """Configurazione scelta dal pannello (tag TSPANEL-CONFIG), altrimenti DHCP."""
-    config = {'mode': 'dhcp', 'ip': '', 'prefix': 24, 'gateway': '', 'dns': []}
-    if CUSTOM.exists():
-        for line in CUSTOM.read_text().splitlines():
-            if line.startswith('# TSPANEL-CONFIG:'):
-                try:
-                    return validate(json.loads(line.split(':', 1)[1].strip()))
-                except (ValueError, TypeError):
-                    break
-    return config
 
 
 def snapshot():
@@ -351,61 +301,6 @@ def confirm(id):
     return result
 
 
-def set_recovery(value):
-    """Voce interna, solo root (installer/SSH): imposta o toglie l'indirizzo di recupero.
-
-    value: un IP 169.254.X.Y, 'random' oppure 'none'. Rende persistente l'alias nel Netplan
-    del pannello e lo aggiunge subito con "ip addr", SENZA riapplicare Netplan: il lease DHCP
-    e le sessioni SSH aperte non vengono toccati.
-    """
-    if os.geteuid() != 0:
-        raise RuntimeError('Operation reserved to root.')
-
-    def perform():
-        assert_platform()
-        if read_pending():
-            raise RuntimeError('Network change pending: confirm it or wait for the restore.')
-        old = recovery_ip()
-        if value == 'none':
-            new = None
-        elif value == 'random':
-            new = '169.254.%d.%d' % (secrets.randbelow(254) + 1, secrets.randbelow(254) + 1)
-        else:
-            new = valid_recovery(value)
-        snap = snapshot()
-        atomic_write(STATE / ('backup-recovery-%d.json' % int(time.time())), json.dumps(snap).encode())
-        previous_conf = RECOVERY_CONF.read_bytes() if RECOVERY_CONF.exists() else None
-        if new:
-            atomic_write(RECOVERY_CONF, ('# Gestito da Raptor VPN: indirizzo di recupero (riservato)\n'
-                                         'RECOVERY_IP=%s\n' % new).encode(), 0o600)
-        else:
-            RECOVERY_CONF.unlink(missing_ok=True)
-        if new or CUSTOM.exists():
-            config = saved_config()
-            if DEFAULT.exists():
-                DEFAULT.unlink()
-            atomic_write(CUSTOM, render(config), 0o600)
-            generate = shell(['netplan', 'generate'], 20)
-            if generate.returncode:
-                restore(snap)
-                if previous_conf is None:
-                    RECOVERY_CONF.unlink(missing_ok=True)
-                else:
-                    atomic_write(RECOVERY_CONF, previous_conf, 0o600)
-                shell(['netplan', 'generate'], 20)
-                raise RuntimeError('Netplan generate failed: ' + generate.stderr[-300:])
-        if old and old != new:
-            shell(['ip', 'addr', 'del', '%s/%d' % (old, RECOVERY_PREFIX), 'dev', DEV], 10)
-        if new:
-            # scope link: Avahi ignora gli indirizzi "link" se esiste un indirizzo globale, quindi
-            # l'IP di recupero non finisce negli annunci mDNS ne' in orangepizero.local.
-            added = shell(['ip', 'addr', 'replace', '%s/%d' % (new, RECOVERY_PREFIX), 'dev', DEV, 'scope', 'link'], 10)
-            if added.returncode:
-                raise RuntimeError('Address saved but not activated immediately: ' + added.stderr[-200:])
-        return {'ok': True, 'recovery_ip': new, 'persistent': True}
-    return locked(perform)
-
-
 def api():
     data = sys.stdin.buffer.read(8193)
     if len(data)>8192:
@@ -433,8 +328,6 @@ def main():
     if len(sys.argv)==2 and sys.argv[1]=='--recover':
         pending=read_pending()
         result=rollback(pending['id']) if pending else {'ok':True,'note':'No restore needed.'}
-    elif len(sys.argv)==3 and sys.argv[1]=='--set-recovery':
-        result=set_recovery(sys.argv[2])
     elif len(sys.argv)==3 and sys.argv[1] in ('--apply','--rollback'):
         sid=sys.argv[2]
         if not re.fullmatch('[0-9a-f]{14}',sid):

@@ -5,7 +5,7 @@
 #
 # Scarica le modifiche (git pull), verifica i file, aggiorna pannello, registro eventi e, se gia'
 # installato, il Wi-Fi annuncio-IP. NON tocca: password del pannello, identita' Tailscale,
-# configurazione di rete, IP di recupero e rotte scelte.
+# configurazione di rete e rotte scelte.
 set -eu
 export LC_ALL=C
 
@@ -28,6 +28,21 @@ git checkout -q -B "$BRANCH" FETCH_HEAD || die 'Aggiornamento dei file non riusc
 echo "Versione: $(git log --oneline -1)"
 sha256sum -c SHA256SUMS >/dev/null || die 'Verifica SHA256 non superata: file danneggiati'
 
+say 'Pulizia IP di recupero (funzione rimossa)'
+# Le schede installate con le versioni precedenti possono avere un indirizzo 169.254.X.Y di recupero
+# (alias su end0, riga nel Netplan del pannello, /etc/raptor-recovery.conf). La funzione e' stata tolta:
+# si rimuove qui con l'helper GIA' INSTALLATO, prima che l'installazione del pannello lo sostituisca con
+# la versione nuova, che non conosce piu' quel comando. Il lease DHCP e le sessioni SSH non si toccano.
+RECOVERY_CONF=/etc/raptor-recovery.conf
+if [ -e "$RECOVERY_CONF" ]; then
+  OUT=$(/usr/local/libexec/tailscale-panel-net-helper --set-recovery none 2>&1) \
+    || die "IP di recupero non rimosso (modifica di rete in sospeso?): $OUT. Il pannello non e' stato aggiornato: riprova con sh update.sh quando la rete e' a posto."
+  rm -f /var/lib/tailscale-panel-network/backup-recovery-*.json
+  echo 'IP di recupero rimosso (indirizzo, Netplan e configurazione).'
+else
+  echo 'Nessun IP di recupero da togliere.'
+fi
+
 say 'Pannello'
 sh ./install_tailscale_panel.sh || die 'Aggiornamento del pannello non riuscito.'
 
@@ -36,7 +51,7 @@ sh ./install_eventlog.sh || die 'Installazione del registro eventi non riuscita.
 
 if [ -x /usr/local/libexec/raptor-ap ]; then
   say 'Wi-Fi annuncio-IP'
-  sh ./install_access.sh --recovery-ip keep --ap on || die 'Aggiornamento del Wi-Fi non riuscito.'
+  sh ./install_access.sh --ap on || die 'Aggiornamento del Wi-Fi non riuscito.'
 fi
 
 sync

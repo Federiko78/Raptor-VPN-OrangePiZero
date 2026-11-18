@@ -145,21 +145,11 @@ if command -v runuser >/dev/null 2>&1 && [ -x /usr/local/libexec/tailscale-panel
     line 'Netplan helper / sudo' 'ERRORE'; ok=0
   fi
 fi
-# Accesso di servizio (consigliato per le schede da consegnare ai clienti).
-if [ -r /etc/raptor-recovery.conf ]; then
-  RIP=$(sed -n 's/^RECOVERY_IP=//p' /etc/raptor-recovery.conf | head -n 1)
-  if [ -n "$RIP" ] && ip -4 addr show dev end0 2>/dev/null | grep -qF "inet $RIP/" \
-     && grep -qF "$RIP/16" /etc/netplan/90-tailscale-panel-end0.yaml 2>/dev/null; then
-    if ip -4 -o addr show dev end0 2>/dev/null | grep -F "inet $RIP/" | grep -q 'scope link'; then
-      line 'IP di recupero' 'OK (attivo, persistente, scope link)'
-    else
-      line 'IP di recupero' 'OK ma scope global: Avahi potrebbe annunciarlo (vedi ACCESSO_DI_SERVIZIO.md)'
-    fi
-  else
-    line 'IP di recupero' 'ERRORE: configurato ma non attivo o non persistente'; ok=0
-  fi
-else
-  line 'IP di recupero' 'non configurato (consigliato: sh install_access.sh)'
+# L'IP di recupero 169.254.X.Y e' una funzione rimossa: se ne resta traccia, la si segnala.
+if [ -e /etc/raptor-recovery.conf ]; then
+  line 'IP di recupero (rimosso)' 'DA VERIFICARE: configurazione residua, lanciare sh update.sh'
+elif grep -qs '169\.254\.' /etc/netplan/90-tailscale-panel-end0.yaml; then
+  line 'IP di recupero (rimosso)' 'DA VERIFICARE: indirizzo 169.254.x.x ancora nel Netplan del pannello (salvare la rete dal pannello lo toglie)'
 fi
 if [ -x /usr/local/libexec/raptor-eventlog ]; then
   if [ "$(systemctl is-enabled raptor-eventlog.service 2>/dev/null || true)" = enabled ] \

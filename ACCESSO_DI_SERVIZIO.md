@@ -1,11 +1,11 @@
-# Accesso di servizio: Wi-Fi "Raptor VPN - <IP>" e IP di recupero
+# Accesso di servizio: Wi-Fi "Raptor VPN - <IP>"
 
-Due funzioni pensate per le schede consegnate ai clienti, quando non conosci l'IP che il DHCP
-della loro rete ha assegnato alla scheda. **Da collaudare sulla scheda reale** prima di consegnare.
+Pensato per le schede consegnate ai clienti, quando non conosci l'IP che il DHCP della loro rete
+ha assegnato alla scheda. **Da collaudare sulla scheda reale** prima di consegnare.
 
 Si installano con `sh install_access.sh` (lo lancia anche `install_factory.sh`).
 
-## 1. Wi-Fi che annuncia l'IP
+## Wi-Fi che annuncia l'IP
 
 Dopo ogni avvio, appena la porta Ethernet ha un IP, la scheda apre per circa **3 minuti** una rete
 Wi-Fi chiamata `Raptor VPN - 192.168.1.57` (l'IP reale). L'installatore lo legge dall'elenco delle
@@ -34,88 +34,9 @@ Limiti da conoscere:
   (`journalctl -u raptor-ap -b`). Se il chip fa i capricci: `ENABLED=0`, immagine Armbian stabile,
   oppure una chiavetta Wi-Fi USB.
 
-## 2. IP di recupero
+## IP di recupero: funzione rimossa
 
-Un indirizzo **tuo** della forma `169.254.X.Y` (X e Y da 1 a 254) che la scheda risponde sempre su
-`end0`, in DHCP e in statico, anche con Tailscale spento, con IP sconosciuto o configurazione
-statica sbagliata. Dal pannello (Rete) rimetti il DHCP e sei a posto.
-
-**Non salta la password**: il pannello chiede sempre l'accesso. Un indirizzo "segreto" non è una
-misura di sicurezza; lo è la password (minimo 12 caratteri).
-
-Come funziona: è un indirizzo aggiuntivo (alias) sull'interfaccia, scritto nel Netplan del pannello
-(per sopravvivere ai riavvii) e attivato subito senza riavviare la rete. Il valore sta solo in
-`/etc/raptor-recovery.conf` sulla scheda (root, 0600): non è nel repository, non compare nel
-pannello e `status` riporta solo "attivo / non attivo".
-
-Limiti da conoscere:
-
-- Funziona **solo dalla stessa rete locale** (stesso switch/router) della scheda, non da Internet
-  e non attraverso un router. Se il cliente ha reti separate (VLAN) devi stare nella stessa.
-- Il tuo PC deve sapere che quell'indirizzo è "qui accanto". Su Windows, come amministratore:
-  `powershell -ExecutionPolicy Bypass -File recupero_windows.ps1 169.254.77.12` (aggiunge una rotta
-  temporanea, apre il pannello e la toglie quando premi INVIO). Su Linux/macOS:
-  `sudo ip route add 169.254.77.12/32 dev eth0` (Linux) oppure
-  `sudo route add -host 169.254.77.12 -interface en0` (macOS).
-- **mDNS (da verificare sulla scheda):** l'alias viene attivato con `scope link` perché Avahi ignori
-  gli indirizzi "link" quando ne esiste uno globale: così il valore non finisce negli annunci
-  `orangepizero.local`. Dopo un riavvio controlla con `ip -4 addr show dev end0` che l'alias abbia
-  ancora `scope link` (se systemd-networkd lo ricrea come `global`, `check_installation.sh` lo segnala)
-  e con `avahi-resolve -4 -n orangepizero.local` che risponda solo l'IP della LAN.
-- Sono vietati 169.254.0.x e 169.254.255.x (riservati) e qualunque indirizzo fuori da 169.254.0.0/16:
-  non può quindi entrare in conflitto con la LAN del cliente.
-- Se hai attivato il firewall in ingresso (`hardening/input_firewall.sh`), la regola per la porta
-  8443 su `end0` vale anche per l'IP di recupero: non serve altro.
-
-### SSH / PuTTY sull'IP di recupero
-
-L'IP di recupero è pensato per il **pannello** (HTTPS 8443). Anche SSH (porta 22) lo raggiunge, perché
-sshd ascolta su tutti gli indirizzi della scheda, ma **solo se si verificano tutte queste condizioni**:
-
-1. **Il PC ha la rotta verso l'indirizzo.** Senza, i pacchetti vanno al router, che li scarta: PuTTY resta
-   fermo fino al timeout. Con `recupero_windows.ps1` la rotta esiste **solo finché la finestra aspetta
-   INVIO**: lancia PuTTY/`ssh` prima di premere INVIO (lo script ora dice anche se la porta 22 risponde).
-2. **Il firewall in ingresso lascia passare SSH dalla LAN.** Con `input_firewall.sh --ssh-lan on` (predefinito)
-   sì; con `--ssh-lan off` (consigliato alla consegna) SSH resta raggiungibile solo via Tailscale, **anche**
-   sull'IP di recupero. È voluto: aprire SSH sul recupero allargherebbe l'esposizione.
-3. **Entri con la chiave.** `hardening/harden_ssh.sh` disattiva la password e ammette solo l'utente
-   amministratore: in PuTTY serve la chiave privata (.ppk) in *Connection → SSH → Auth → Credentials*.
-
-Come capire quale condizione manca (il pannello sull'IP di recupero funziona, SSH no?):
-
-```
-# sul PC Windows, PowerShell come amministratore, con la rotta attiva (finestra dello script aperta)
-Test-NetConnection 169.254.X.Y -Port 8443   # pannello
-Test-NetConnection 169.254.X.Y -Port 22     # SSH
-
-# sulla scheda (da Tailscale o console)
-ip -4 addr show dev end0                    # l'alias deve esserci
-sudo ss -tlnp | grep ':22 '                 # sshd in ascolto
-sudo cat /etc/raptor-input-guard.conf          # SSH_LAN=1 oppure 0
-sudo iptables -S RAPTOR_IN | grep 'dport 22'
-```
-
-- 8443 risponde e 22 no → firewall con SSH dalla LAN spento (condizione 2): usa Tailscale per SSH.
-- Nessuna delle due risponde → manca la rotta sul PC (condizione 1) o PC e scheda non sono sulla stessa LAN.
-- 22 risponde ma PuTTY rifiuta l'accesso → problema di chiave/utente (condizione 3), non di rete.
-
-Cambiare o togliere il valore (da SSH, come root):
-
-```
-/usr/local/libexec/tailscale-panel-net-helper --set-recovery 169.254.88.5   # cambia
-/usr/local/libexec/tailscale-panel-net-helper --set-recovery random         # ne genera uno
-/usr/local/libexec/tailscale-panel-net-helper --set-recovery none           # lo toglie
-```
-
-Il pannello (utente `tspanel`) può lanciare l'helper solo senza argomenti: questa funzione non è
-raggiungibile dal web.
-
-## Collaudo sulla scheda (checklist)
-
-1. `sh install_access.sh --recovery-ip 169.254.77.12 --ap on`
-2. `ip -4 addr show dev end0` mostra anche `169.254.77.12/16 ... scope link`; `sh check_installation.sh` è OK.
-3. `ping` e `https://169.254.77.12:8443` dal PC con lo script Windows.
-4. Riavvio: l'alias torna da solo; il telefono vede `Raptor VPN - <IP>` per circa tre minuti (alcuni telefoni, iPhone compresi, aggiornano l'elenco Wi-Fi con ritardo: ricarica la lista).
-5. Dal pannello passa a IP statico sbagliato di proposito: dopo i 150 s il ripristino scatta, e
-   comunque l'IP di recupero risponde durante tutta la prova.
-6. Ripeti 20 riavvii controllando `journalctl -u raptor-ap -b` e che la scheda torni sempre in rete.
+L'indirizzo di recupero `169.254.X.Y` (e lo script `recupero_windows.ps1`) non fa più parte del progetto.
+`sh update.sh` lo toglie dalle schede che lo avevano: elimina l'indirizzo, la riga nel Netplan del pannello
+e `/etc/raptor-recovery.conf`, senza toccare il DHCP né le sessioni SSH aperte. Per rientrare in una scheda
+di cui non conosci l'IP usa il Wi-Fi qui sopra, la lista dei dispositivi del router o Tailscale.
