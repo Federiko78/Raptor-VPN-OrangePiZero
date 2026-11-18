@@ -10,6 +10,7 @@ die() { printf '\nERRORE: %s\n' "$*" >&2; exit 1; }
 [ -t 0 ] || die 'Lanciare l’installer in una sessione SSH interattiva (TTY): verrà chiesta la password Web UI.'
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$BASE"
+command -v python3 >/dev/null 2>&1 || die 'python3 mancante: eseguire  apt-get update && apt-get install -y python3  (oppure usare bootstrap.sh)'
 for f in install_tailscale_panel.sh install_access.sh raptor_ap.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py password_policy.py check_installation.sh backup_panel.sh restore_panel.sh; do
   [ -s "$f" ] || die "File mancante nel pacchetto: $f"
 done

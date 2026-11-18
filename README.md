@@ -18,23 +18,36 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - **Wi-Fi "Raptor VPN - <IP>"** per ~1 minuto dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
 - **IP di recupero** `169.254.X.Y` scelto da te: raggiunge sempre il pannello dalla stessa LAN, anche con Tailscale spento o IP sconosciuto (la password resta obbligatoria). Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
-## Requisiti
+## Sistema operativo richiesto
 
-- Orange Pi Zero con **Armbian Debian 13 (Trixie) Minimal, armhf**, Ethernet `end0`, `systemd-networkd` e Netplan.
-- microSD da 16 GB o più (almeno 450 MiB liberi), Internet temporaneo per apt/Tailscale.
+**Armbian Debian 13 "Trixie" Minimal (CLI), armhf, per Orange Pi Zero** (Allwinner H2+, 32 bit). L'installer rifiuta Ubuntu, Debian 12, le versioni Desktop e qualunque immagine senza `systemd-networkd` e Netplan.
+
+1. Scarica l'immagine da [armbian.com/orange-pi-zero](https://www.armbian.com/orange-pi-zero/) (scegli *Debian 13 trixie · Minimal*) e scrivila sulla microSD con [Armbian Imager](https://www.armbian.com/imager/) o balenaEtcher. Preferisci una build **stabile** a una nightly.
+2. Collega la scheda alla rete con il cavo Ethernet (serve Internet, con DHCP) e accendila.
+3. Primo accesso via SSH come `root`, password `1234`: Armbian chiede di cambiarla e di creare un utente.
+
+Collaudato con: `Armbian_community 26.11.0-trunk.130 trixie`, kernel `6.18.63-current-sunxi`. Servono almeno 450 MiB liberi (microSD da 16 GB o più).
 
 ## Installazione (scheda nuova)
 
-Da root, in una sessione SSH interattiva:
+Da root, in una sessione SSH con terminale, **un solo comando** (installa git e python3, scarica il progetto e lancia l'installer):
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/Federiko78/Raptor-VPN-OrangePiZero/main/bootstrap.sh | sh
+```
+
+L'installer chiede la password del pannello (minimo 12 caratteri), l'**IP di recupero** e se attivare il **Wi-Fi che annuncia l'IP**; alla fine autentica Tailscale con `tailscale up`. Per provare un ramo diverso: `... | RAPTOR_BRANCH=nome-ramo sh`.
+
+Se preferisci passo per passo:
+
+```sh
+apt-get update && apt-get install -y git python3
 git clone https://github.com/Federiko78/Raptor-VPN-OrangePiZero.git
 cd Raptor-VPN-OrangePiZero
 sh ./install_factory.sh
-tailscale up
 ```
 
-L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenziali, policy o servizi già presenti. Dettagli, verifiche e rollback sono in [`TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md`](TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md).
+L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenziali, policy o servizi già presenti. Dettagli, verifiche e rollback in [`TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md`](TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md); IP di recupero e Wi-Fi in [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Sicurezza
 
