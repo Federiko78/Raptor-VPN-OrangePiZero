@@ -37,6 +37,30 @@ class ConfTests(unittest.TestCase):
         self.assertEqual(ap.parse_conf('IFACE=../etc')['IFACE'], 'wlan0')
 
 
+class InstalledConfTests(unittest.TestCase):
+    """Il file /etc/raptor-ap.conf scritto dall'installer, con i suoi commenti, deve funzionare."""
+    @staticmethod
+    def installed_text():
+        script = (DIR / 'install_access.sh').read_text()
+        match = re.search(r"cat > \"\$AP_CONF\" <<'EOF'\n(.*?)\nEOF\n", script, re.S)
+        assert match, 'blocco di configurazione non trovato in install_access.sh'
+        return match.group(1)
+
+    def test_installed_file_parses_to_its_own_values(self):
+        conf = ap.parse_conf(self.installed_text())
+        self.assertEqual(conf, {'ENABLED': 1, 'DURATION': 60, 'CHANNEL': 6, 'IFACE': 'wlan0', 'WAIT_IP': 90})
+
+    def test_editing_the_installed_file_takes_effect(self):
+        text = self.installed_text().replace('ENABLED=1', 'ENABLED=0').replace('DURATION=60', 'DURATION=180')
+        conf = ap.parse_conf(text)
+        self.assertEqual((conf['ENABLED'], conf['DURATION']), (0, 180))
+
+    def test_inline_comment_forms(self):
+        self.assertEqual(ap.parse_conf('DURATION=90   # novanta')['DURATION'], 90)
+        self.assertEqual(ap.parse_conf('DURATION = 90#x')['DURATION'], 90)
+        self.assertEqual(ap.parse_conf('IFACE=wlan1 # seconda')['IFACE'], 'wlan1')
+
+
 class IpAndSsidTests(unittest.TestCase):
     def test_picks_lan_address_not_recovery(self):
         data = addrs(('169.254.77.12', 'global'), ('192.168.1.57', 'global'))

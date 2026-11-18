@@ -49,6 +49,7 @@ def parse_conf(text):
         if not line or line.startswith('#') or '=' not in line:
             continue
         key, value = (x.strip() for x in line.split('=', 1))
+        value = value.split('#', 1)[0].strip()   # commento sulla stessa riga: DURATION=60  # secondi
         if key == 'ENABLED' and value in ('0', '1'):
             conf[key] = int(value)
         elif key == 'DURATION' and value.isdigit() and 20 <= int(value) <= 300:
