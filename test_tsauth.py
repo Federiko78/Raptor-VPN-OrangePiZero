@@ -29,6 +29,10 @@ cfg = json.load(open(os.path.join(base, 'cfg.json')))
 if args[:1] == ['status']:
     print(json.dumps(cfg['status']))
     sys.exit(0)
+if args[:1] == ['up'] and len(args) > 1 and cfg.get('strict_up'):
+    # come il vero tailscale: qualunque flag disattiva la "ripresa semplice" e fa scattare il controllo sulle impostazioni
+    sys.stdout.write("Error: changing settings via 'tailscale up' requires mentioning all non-default flags.\\n")
+    sys.exit(1)
 if args[:1] in (['login'], ['up']):
     for arg in args:
         if arg.startswith('--auth-key=file:'):
@@ -64,7 +68,7 @@ class Base(unittest.TestCase):
         self.fake.chmod(0o755)
         self.configure(status={'BackendState': 'NeedsLogin'})
         for name, value in (('TAILSCALE', str(self.fake)), ('RUN_DIR', str(self.base / 'run')),
-                            ('LOCK_PATH', str(self.base / 'lock'))):
+                            ('LOCK_PATH', str(self.base / 'lock')), ('CONNECT_SETTLE', 0.2)):
             patcher = patch.object(a, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -268,7 +272,20 @@ class ConnectTests(Base):
         self.configure(status={'BackendState': 'Stopped'}, after_login_status={'BackendState': 'Running'}, login_out='Success.\n')
         self.assertEqual(self.main({'action': 'connect'}), (0, {'ok': True, 'connected': True}))
         (call,) = [c for c in self.calls() if c[:1] == ['up']]
-        self.assertEqual(call, ['up', '--timeout=20s'], 'nessuna opzione: non deve toccare rotte o DNS')
+        self.assertEqual(call, ['up'], 'nessun flag, nemmeno --timeout: altrimenti tailscale non fa la ripresa semplice')
+
+    def test_board_with_custom_settings_resumes_like_the_real_tailscale_requires(self):
+        # Regressione: con rotte pubblicate (impostazioni non predefinite) "up --timeout=20s" falliva con
+        # "requires mentioning all non-default flags". Il finto tailscale rifiuta qualunque flag come quello vero.
+        self.configure(status={'BackendState': 'Stopped'}, after_login_status={'BackendState': 'Running'}, strict_up=True)
+        self.assertEqual(self.main({'action': 'connect'}), (0, {'ok': True, 'connected': True}))
+
+    def test_state_that_takes_a_moment_to_become_running_is_waited_for(self):
+        self.configure(status={'BackendState': 'Stopped'}, login_out='')
+        code, result = self.main({'action': 'connect'})
+        self.assertEqual(code, 1, 'dopo l\'attesa ancora fermo: errore, non successo finto')
+        self.assertTrue(result['error'].startswith('Unable to reactivate Tailscale: '))
+
 
     def test_connect_may_ask_for_a_new_login(self):
         self.configure(status={'BackendState': 'Stopped'}, login_code=1, login_out='visit %s' % URL)

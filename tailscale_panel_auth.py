@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 TAILSCALE = '/usr/bin/tailscale'
 RUN_DIR = '/run'
@@ -37,7 +38,8 @@ MAX_TAGS = 5
 
 LOGIN_URL_WAIT = '15s'
 LOGIN_KEY_WAIT = '45s'
-CONNECT_WAIT = '20s'
+CONNECT_RUN_SECONDS = 25    # limite per "tailscale up" (senza opzioni: niente --timeout, vedi connect())
+CONNECT_SETTLE = 8.0        # dopo "up" lo stato puo' impiegare qualche istante a diventare Running
 
 
 class Refused(Exception):
@@ -183,11 +185,19 @@ def connect(_params):
     state, _ = backend_state()
     if state == 'Running':
         return {'ok': True, 'connected': True}
-    # "up" senza opzioni non cambia nessuna impostazione (rotte, DNS, ...): riattiva e basta.
-    code, text = run([TAILSCALE, 'up', '--timeout=' + CONNECT_WAIT], 40)
-    state, url = backend_state()
-    if state == 'Running':
-        return {'ok': True, 'connected': True}
+    # "tailscale up" SENZA NESSUN FLAG e' la ripresa semplice: riaccende e basta, e rotte, DNS e il resto restano come sono.
+    # Con qualunque flag, anche solo --timeout, tailscale controlla invece che si citino tutte le impostazioni non
+    # predefinite e si ferma con "changing settings via 'tailscale up' requires mentioning all non-default flags".
+    # Per questo il limite di tempo e' del processo (run), non di tailscale.
+    code, text = run([TAILSCALE, 'up'], CONNECT_RUN_SECONDS)
+    deadline = time.monotonic() + (CONNECT_SETTLE if code == 0 else 0)
+    while True:
+        state, url = backend_state()
+        if state == 'Running':
+            return {'ok': True, 'connected': True}
+        if url or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
     found = URL_RE.search(text)
     url = url or (found.group(0) if found else '')
     if url:
