@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import os
@@ -22,14 +23,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from password_policy import password_error, POLICY_DESCRIPTION
 from panel_assets import EYE_B64
+from panel_i18n import Catalog, DEFAULT_LANG
 
 AUTH_PATH = '/etc/tailscale-panel/auth.json'
 STATE_PATH = '/var/lib/tailscale-panel/settings.json'
 # Registro eventi scritto SOLO da raptor-eventlog (root): il pannello lo legge e basta.
 EVENTS_PATH = '/var/lib/raptor-events/events.jsonl'
-EVENTS_TAIL_BYTES = 128 * 1024     # si legge solo la coda del file
+EVENTS_TAIL_BYTES = 512 * 1024     # piu' del limite del file (400 KB): si legge tutto, i contatori usano tutta la storia
 EVENTS_LIMIT = 200                 # eventi restituiti (i piu' recenti)
 EVENT_TYPES = ('boot', 'shutdown', 'unclean_shutdown', 'clock_synced')
+BOOT_ID_RE = re.compile(r'[0-9a-f-]{8,64}')
 CERT_PATH = '/etc/tailscale-panel/cert.pem'
 KEY_PATH = '/etc/tailscale-panel/key.pem'
 HELPER = '/usr/local/libexec/tailscale-panel-helper'
@@ -44,6 +47,8 @@ LAN_DEV = os.environ.get('PANEL_LAN_DEV', 'end0')
 SESSIONS = {}
 FAILURES = {}
 LOCK = threading.Lock()
+CATALOG = Catalog()     # lingue: i18n/*.json (en = predefinita)
+LANG_COOKIE_AGE = 365 * 86400
 # Limiti di robustezza: la scheda ha circa 512 MB di RAM ed e' esposta alla LAN del cliente.
 MAX_CONNECTIONS = 24         # connessioni simultanee; oltre, la connessione viene chiusa subito
 HANDSHAKE_TIMEOUT = 10       # secondi concessi per completare l'handshake TLS
@@ -176,7 +181,7 @@ def pref(flag):
 def lan_details():
     """Read the *actual* Ethernet address on every API request; never cache it."""
     details = {'device':LAN_DEV, 'ip':'-', 'subnet':'', 'gateway':'-',
-               'dhcp':'Non verificato', 'web_name':socket.gethostname()+'.local'}
+               'dhcp':'Not verified', 'web_name':socket.gethostname()+'.local'}
     try:
         ip_cmd = shutil.which('ip') or '/usr/bin/ip'
         response = run([ip_cmd, '-j', '-4', 'addr', 'show', 'dev', LAN_DEV])
@@ -198,7 +203,7 @@ def lan_details():
                 details['subnet'] = str(network)
                 # Kernel marks DHCP-leased IP addresses as dynamic.
                 if addr.get('dynamic') is True or 'dynamic' in addr.get('flags', []):
-                    details['dhcp'] = 'Attivo (indirizzo dinamico)'
+                    details['dhcp'] = 'Active (dynamic address)'
                 break
         route = run([ip_cmd, '-j', '-4', 'route', 'show', 'default'])
         if route.returncode == 0:
@@ -206,7 +211,7 @@ def lan_details():
                 if entry.get('dev') == LAN_DEV:
                     details['gateway'] = entry.get('gateway', '-')
                     if entry.get('protocol') == 'dhcp':
-                        details['dhcp'] = 'Attivo'
+                        details['dhcp'] = 'Active'
                     break
         # IP addresses without a dynamic flag can still originate from DHCP;
         # show unknown rather than incorrectly claiming that DHCP is off.
@@ -233,9 +238,9 @@ def events_data(path=None, now=None):
             handle.seek(max(0, size - EVENTS_TAIL_BYTES))
             raw = handle.read(EVENTS_TAIL_BYTES + 1)
     except FileNotFoundError:
-        return {'available': False, 'reason': 'Registro eventi non ancora attivo su questa scheda (installare raptor-eventlog).'}
+        return {'available': False, 'reason': 'Event log not active on this board yet (install raptor-eventlog).'}
     except OSError:
-        return {'available': False, 'reason': 'Registro eventi non leggibile.'}
+        return {'available': False, 'reason': 'Event log not readable.'}
     lines = raw.decode('utf-8', 'replace').splitlines()
     if size > EVENTS_TAIL_BYTES and lines:
         lines = lines[1:]                      # la prima riga della coda puo' essere tagliata a meta'
@@ -251,6 +256,9 @@ def events_data(path=None, now=None):
         if epoch is None:
             continue
         clean = {'type': item['type'], 'epoch': epoch}
+        boot_id = item.get('boot_id')
+        if isinstance(boot_id, str) and BOOT_ID_RE.fullmatch(boot_id):
+            clean['_bid'] = boot_id                # solo interno: serve a correggere l'orario, non esce mai
         for key in ('previous', 'kind'):
             value = item.get(key)
             if isinstance(value, str) and 0 < len(value) <= 32 and all(c.islower() or c == '_' for c in value):
@@ -271,6 +279,15 @@ def events_data(path=None, now=None):
             uptime = int(float(handle.read().split()[0]))
     except (OSError, ValueError, IndexError):
         uptime = 0
+    # All'avvio l'orologio puo' essere indietro (niente batteria): quando poi si sincronizza, il registro scrive
+    # 'clock_synced' con la correzione. Qui la si applica all'avvio (e al rilevamento) di quello stesso avvio.
+    jumps = {e['_bid']: e['jump_seconds'] for e in events if e['type'] == 'clock_synced' and '_bid' in e and 'jump_seconds' in e}
+    for e in events:
+        jump = jumps.get(e.get('_bid'))
+        if jump and e['type'] in ('boot', 'unclean_shutdown') and _event_int(e['epoch'] + jump) is not None:
+            e['epoch'] += jump
+    for e in events:
+        e.pop('_bid', None)
     month_ago = now - 30 * 86400
     recent = [e for e in events if e['epoch'] >= month_ago]
     unclean = [e for e in events if e['type'] == 'unclean_shutdown']
@@ -280,11 +297,15 @@ def events_data(path=None, now=None):
                         'boots_30d': sum(1 for e in recent if e['type'] == 'boot'),
                         'unclean_30d': sum(1 for e in recent if e['type'] == 'unclean_shutdown'),
                         'last_unclean_epoch': unclean[-1]['epoch'] if unclean else None,
+                        # Per i contatori (oggi/settimana/mese/anno): il browser li calcola nel SUO fuso orario.
+                        # Il primo avvio assoluto non e' un riavvio.
+                        'restart_epochs': sorted(e['epoch'] for e in events if e['type'] == 'boot' and e.get('previous') != 'first_boot')[-3000:],
+                        'unclean_epochs': sorted(e['epoch'] for e in unclean)[-3000:],
                         'total': len(events)}}
 
 
 def status_data():
-    result = {'backend':'Non disponibile', 'tailscale_ip':'-', 'hostname':'-',
+    result = {'backend':'Unavailable', 'tailscale_ip':'-', 'hostname':'-',
               'tailnet':'-', 'error':'', 'version':'-', 'lan':lan_details(),
               'forwarding':False, 'settings':saved_state(), 'cli_read_ok':False,
               'auth_url':'', 'tags':[]}
@@ -295,7 +316,7 @@ def status_data():
         else:
             s = json.loads(p.stdout)
             self_node = s.get('Self') or {}
-            result['backend'] = s.get('BackendState', 'Sconosciuto')
+            result['backend'] = s.get('BackendState', 'Unknown')
             result['hostname'] = self_node.get('HostName') or '-'
             result['tailscale_ip'] = ', '.join(self_node.get('TailscaleIPs') or []) or '-'
             tailnet = s.get('CurrentTailnet') or {}
@@ -341,7 +362,7 @@ def status_data():
         proc=run(['/usr/bin/sudo','-n',NET_HELPER], timeout=9,
                  input_text=json.dumps({'action':'status'}))
         net_status=read_json_from_string(proc.stdout)
-        result['network'] = net_status.get('network', {'supported':False, 'reason':proc.stderr.strip()[:250] or 'Gestione Ethernet non disponibile'})
+        result['network'] = net_status.get('network', {'supported':False, 'reason':proc.stderr.strip()[:250] or 'Ethernet management not available'})
     except (OSError, subprocess.TimeoutExpired) as err:
         result['network']={'supported':False, 'reason':str(err)[:250]}
     return result
@@ -352,9 +373,9 @@ def tailscale_auth(request):
     try:
         proc = run(['/usr/bin/sudo', '-n', AUTH_HELPER], timeout=85, input_text=json.dumps(request))
     except subprocess.TimeoutExpired:
-        return {'ok':False, 'error':'Tailscale non ha risposto in tempo: controlla lo stato e riprova.'}
+        return {'ok':False, 'error':'Tailscale did not answer in time: check the status and try again.'}
     except OSError as exc:
-        return {'ok':False, 'error':'Programma di accesso non disponibile: %s' % str(exc)[:120]}
+        return {'ok':False, 'error':'Login program not available: %s' % str(exc)[:120]}
     reply = read_json_from_string(proc.stdout)
     if proc.returncode == 0 and reply.get('ok') is True:
         out = {'ok':True}
@@ -366,7 +387,7 @@ def tailscale_auth(request):
         return out
     error = reply.get('error')
     if not isinstance(error, str) or not error.strip():
-        error = 'Operazione non riuscita: programma di accesso non installato o non autorizzato (rilancia install_tailscale_panel.sh).'
+        error = 'Operation failed: login program not installed or not authorised (re-run install_tailscale_panel.sh).'
     return {'ok':False, 'error':error.strip()[:300]}
 
 
@@ -482,15 +503,37 @@ ul{padding-left:20px;color:#b4c0cc;line-height:1.9}
 .authmsg{margin:14px 0 0;padding:8px 10px;border:1px solid #8e3636;border-radius:6px;background:rgba(58,23,23,.92);color:#ff9898;font-size:12px;font-weight:800}
 .authfoot{margin-top:16px;text-align:center;font-size:9px;letter-spacing:1.7px;text-transform:uppercase;color:#6d7781}
 .authfoot:before{content:"◆";margin-right:9px;color:#f0c419}
+.langsw{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--edge2);border-radius:999px}
+.lang{padding:2px 9px;border-radius:999px;font-size:11.5px;font-weight:800;letter-spacing:.8px;color:var(--muted);text-decoration:none}
+.lang:hover{color:var(--text)}
+.lang.on{background:var(--gold);color:#090b0e}
+.authlang{margin-top:14px;text-align:center}
+.stats{margin:0 0 16px;padding:18px 22px 20px;background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:var(--radius);box-shadow:0 8px 28px rgba(0,0,0,.32)}
+.statshead{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+.statsintro{margin:6px 0 0;color:var(--muted);font-size:13px;max-width:62ch}
+.statsmeta{display:flex;align-items:center;gap:10px}
+.statsmeta .pill{display:inline-block}
+.pill.live{color:var(--green);border-color:rgba(0,229,138,.35)}
+.statgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:14px}
+.stat{padding:14px 16px;border:1px solid var(--edge);border-radius:8px;background:#0d1319}
+.stat .meta{font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
+.stat .num{margin:8px 0 4px;font-size:34px;font-weight:800;line-height:1;color:var(--gold-hi);font-variant-numeric:tabular-nums}
+.stat small{display:block;min-height:1.2em;color:var(--muted);font-size:12.5px}
+.evbar{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:14px}
+.evchip{padding:11px 14px;border:1px solid var(--edge);border-radius:8px;background:#0d1319}
+.evchip .meta{display:block;font-size:11px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)}
+.evchip strong{display:block;margin-top:4px;font-size:15px}
+.evchip small{display:block;margin-top:3px;color:#ff8da1;font-size:12.5px}
+.evchip.hot{border-color:rgba(255,54,88,.45);background:rgba(255,54,88,.07)}
 @media(max-width:900px){.top{position:static;gap:14px;padding:8px 12px;flex-wrap:wrap}.tabs{order:3;flex-basis:100%}.tab{min-height:40px}}
 @media(max-width:480px){.pill{display:none}}
-@media(max-width:770px){.formgrid{grid-template-columns:1fr}.shell{grid-template-columns:1fr}.columns{grid-template-columns:1fr}main{padding:18px 14px 60px}.word{font-size:18px;letter-spacing:4px}.authwrap .auth{padding:16px 18px 20px}.authform input{font-size:16px}}
+@media(max-width:770px){.statgrid,.evbar{grid-template-columns:repeat(2,1fr)}.formgrid{grid-template-columns:1fr}.shell{grid-template-columns:1fr}.columns{grid-template-columns:1fr}main{padding:18px 14px 60px}.word{font-size:18px;letter-spacing:4px}.authwrap .auth{padding:16px 18px 20px}.authform input{font-size:16px}}
 '''
 
 
-def page(body, extra=''):
+def page(body, extra='', lang=DEFAULT_LANG):
     icon = 'data:image/png;base64,' + EYE_B64
-    return ('<!doctype html><html lang="it"><head><meta charset="utf-8">'
+    return ('<!doctype html><html lang="' + CATALOG.pick(lang) + '"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             '<meta name="theme-color" content="#090d11"><meta name="color-scheme" content="dark">'
             '<title>Raptor VPN</title><link rel="icon" type="image/png" href="' + icon + '">'
@@ -499,108 +542,136 @@ def page(body, extra=''):
 
 LOGIN = '''<main class="authwrap"><section class="auth"><div class="eye" role="img" aria-label="Raptor"></div>
 <div class="authbrand">Raptor <b>VPN</b></div>
-<h1 class="authsub">Accesso <b>protetto</b></h1><div class="authtag">Gestione Tailscale · Orange Pi Zero</div><div class="authrule"></div>
-__MSG__<form method="post" action="/login" class="authform"><label for="password">PASSWORD<input id="password" name="password" type="password" autocomplete="current-password" required autofocus></label>
-<button type="submit">ACCEDI</button></form>
-<div class="authfoot">Connessione HTTPS locale protetta</div></section></main>'''
+<h1 class="authsub">[[login.title]]</h1><div class="authtag">[[login.tag]]</div><div class="authrule"></div>
+__MSG__<form method="post" action="/login" class="authform"><label for="password">[[login.password]]<input id="password" name="password" type="password" autocomplete="current-password" required autofocus></label>
+<button type="submit">[[login.submit]]</button></form>
+<div class="authfoot">[[login.foot]]</div><div class="authlang"><span class="langsw" aria-label="{{lang.label}}">__LANGSW__</span></div></section></main>'''
 
 
-def login_page(message=''):
-    """Pagina di accesso; il messaggio (testo fisso, mai dati dell'utente) compare dentro la scheda."""
-    box = '<div class="authmsg" role="alert">%s</div>' % message if message else ''
-    return page(LOGIN.replace('__MSG__', box))
+def login_page(error=None, lang=DEFAULT_LANG):
+    """Login page. `error` is the key of a fixed message (never data typed by the user)."""
+    lang = CATALOG.pick(lang)
+    box = '<div class="authmsg" role="alert">%s</div>' % html.escape(CATALOG.text(lang, error)) if error else ''
+    body = CATALOG.render(LOGIN, lang).replace('__MSG__', box).replace('__LANGSW__', CATALOG.switcher(lang))
+    return page(body, lang=lang)
 
 
-DASH = '''<header class="top"><a class="brand" href="#top"><span class="eye" role="img" aria-label="Raptor"></span><span><span class="word">Raptor <b>VPN</b></span><span class="tag">Tailscale · Orange Pi Zero</span></span></a>
-<nav class="tabs" aria-label="Sezioni"><a class="tab" href="#account">Account</a><a class="tab" href="#routes">Rotte</a><a class="tab" href="#lanDiscovery">Dispositivi</a><a class="tab" href="#ethernet">Ethernet</a><a class="tab" href="#events">Eventi</a><a class="tab" href="#security">Sicurezza</a></nav>
-<div class="top-right"><span class="pill">Web UI v1.6.0</span><form method="post" action="/logout"><input type="hidden" name="csrf" value="__CSRF__"><button class="quiet">Esci</button></form></div></header>
+def dashboard_page(csrf, lang=DEFAULT_LANG):
+    lang = CATALOG.pick(lang)
+    body = CATALOG.render(DASH, lang)          # [[key]] / {{key}}: first of all, so that no text can add tokens
+    body = body.replace('__CSRF__', csrf).replace('__LANGSW__', CATALOG.switcher(lang)).replace('__I18N__', CATALOG.client(lang))
+    return page(body, lang=lang)
+
+
+DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" role="img" aria-label="Raptor"></span><span><span class="word">Raptor <b>VPN</b></span><span class="tag">[[top.tagline]]</span></span></a>
+<nav class="tabs" aria-label="{{nav.label}}"><a class="tab" href="#account">[[nav.account]]</a><a class="tab" href="#routes">[[nav.routes]]</a><a class="tab" href="#lanDiscovery">[[nav.devices]]</a><a class="tab" href="#ethernet">[[nav.ethernet]]</a><a class="tab" href="#security">[[nav.security]]</a><a class="tab" href="#events">[[nav.events]]</a></nav>
+<div class="top-right"><span class="langsw" aria-label="{{lang.label}}">__LANGSW__</span><span class="pill">Web UI v1.6.0</span><form method="post" action="/logout"><input type="hidden" name="csrf" value="__CSRF__"><button class="quiet">[[top.logout]]</button></form></div></header>
 <main id="top">
-<div class="shell"><div class="card"><div class="meta">Connessione Tailscale</div><div class="big" id="backend">Verifica...</div><small id="tailnet">-</small></div><div class="card"><div class="meta">Indirizzo Tailscale</div><div class="big value" id="tsip">-</div><small id="hostname">-</small></div><div class="card"><div class="meta">Rete locale</div><div class="big value" id="lanip">-</div><small id="interface">-</small></div></div>
-<section class="card accountcard" id="account"><h2 class="subhead">Account Tailscale</h2>
+<section class="stats" id="stats"><div class="statshead"><div><h2 class="subhead">[[stat.title]]</h2><p class="statsintro">[[stat.intro]]</p></div><div class="statsmeta"><span class="pill live" id="statsUpdated">-</span><button class="quiet" id="statsRefresh" type="button">[[stat.refresh]]</button></div></div>
+<div class="statgrid"><div class="stat"><div class="meta">[[stat.today]]</div><div class="num" id="stToday">-</div><small id="stTodayPl"></small></div><div class="stat"><div class="meta">[[stat.week]]</div><div class="num" id="stWeek">-</div><small id="stWeekPl"></small></div><div class="stat"><div class="meta">[[stat.month]]</div><div class="num" id="stMonth">-</div><small id="stMonthPl"></small></div><div class="stat"><div class="meta">[[stat.year]]</div><div class="num" id="stYear">-</div><small id="stYearPl"></small></div></div></section>
+<div class="shell"><div class="card"><div class="meta">[[sum.connection]]</div><div class="big" id="backend">[[sum.checking]]</div><small id="tailnet">-</small></div><div class="card"><div class="meta">[[sum.tsip]]</div><div class="big value" id="tsip">-</div><small id="hostname">-</small></div><div class="card"><div class="meta">[[sum.lan]]</div><div class="big value" id="lanip">-</div><small id="interface">-</small></div></div>
+<section class="card accountcard" id="account"><h2 class="subhead">[[acc.title]]</h2>
 <div id="accNote" class="netmessage" role="status"></div>
-<div id="accDown" class="notice warnnotice" hidden><strong>Tailscale non risponde.</strong> Il servizio potrebbe essere fermo o in avvio: attendi qualche secondo e premi “Aggiorna stato”. <span id="accDownWhy"></span></div>
+<div id="accDown" class="notice warnnotice" hidden>[[acc.down]] <span id="accDownWhy"></span></div>
 <div id="accConnected" hidden>
-<p>La scheda è collegata alla rete Tailscale <strong id="accTailnet">-</strong> con il nome <strong id="accHost">-</strong>.</p>
-<p id="accTagsRow" hidden><strong>Tag:</strong> <span class="value" id="accTags">-</span></p>
-<div class="buttonrow"><button class="danger" id="accLogout" type="button">Scollega da Tailscale</button></div>
-<div id="accLogoutBox" class="notice warnnotice" hidden><strong>Scollegare questa scheda dall’account?</strong> Le rotte pubblicate smettono di funzionare e la scheda non sarà più raggiungibile da remoto finché non la ricolleghi da qui (serve di nuovo un link o una chiave).
-<div class="buttonrow"><button class="danger" id="accLogoutYes" type="button">Sì, scollega</button><button class="quiet" id="accLogoutNo" type="button">Annulla</button></div></div></div>
-<div id="accStopped" hidden><p>La scheda è autenticata ma Tailscale è <strong>fermo</strong> (disattivato).</p><div class="buttonrow"><button class="action" id="accConnect" type="button">Riattiva Tailscale</button></div></div>
-<div id="accWait" class="notice" hidden>La scheda ha chiesto l’accesso e attende l’<strong>approvazione</strong> nella console di Tailscale (<a href="https://login.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Admin → Machines</a>). Questa pagina si aggiorna da sola.</div>
+<p id="accConnectedText"></p>
+<p id="accTagsRow" hidden><strong>[[acc.tags_label]]</strong> <span class="value" id="accTags">-</span></p>
+<div class="buttonrow"><button class="danger" id="accLogout" type="button">[[acc.logout]]</button></div>
+<div id="accLogoutBox" class="notice warnnotice" hidden>[[acc.logout_confirm]]
+<div class="buttonrow"><button class="danger" id="accLogoutYes" type="button">[[acc.logout_yes]]</button><button class="quiet" id="accLogoutNo" type="button">[[acc.cancel]]</button></div></div></div>
+<div id="accStopped" hidden><p>[[acc.stopped]]</p><div class="buttonrow"><button class="action" id="accConnect" type="button">[[acc.reactivate]]</button></div></div>
+<div id="accWait" class="notice" hidden>[[acc.wait]]</div>
 <div id="accLogin" hidden>
-<p>La scheda non è ancora collegata a un account Tailscale. Scegli come collegarla: tutto si fa da qui, senza SSH.</p>
-<div class="radioopts"><label><input type="radio" name="accMode" id="accModeUrl" value="url" checked> Accedi con link</label><label><input type="radio" name="accMode" id="accModeKey" value="key"> Accedi con chiave e tag</label></div>
-<form id="accForm" autocomplete="off"><div class="formgrid"><div class="field"><label for="accName">Nome della scheda (facoltativo)</label><input id="accName" type="text" placeholder="raptor-cliente" spellcheck="false" maxlength="63" autocomplete="off"></div></div>
-<div id="accKeyFields" class="hidden"><div class="formgrid"><div class="field"><label for="accKey">Chiave di autenticazione</label><input id="accKey" type="password" placeholder="tskey-auth-..." autocomplete="off" spellcheck="false" maxlength="220"></div>
-<div class="field"><label for="accTagsIn">Tag (facoltativi, separati da virgola)</label><input id="accTagsIn" type="text" placeholder="tag:cliente" spellcheck="false" autocomplete="off"></div></div>
-<p class="passwordinfo">Crea la chiave in <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">Tailscale Admin → Settings → Keys</a>. Per usare dei tag, la chiave deve essere creata con gli stessi tag e quei tag devono esistere nella policy (tagOwners). La chiave non viene salvata sulla scheda.</p></div>
-<div class="buttonrow"><button class="action" id="accGo" type="submit">Ottieni il link di accesso</button><span id="accMsg" class="netmessage" role="status"></span></div></form>
-<div id="accLink" class="notice" hidden><strong>Apri questo link</strong> con un browser (anche dal telefono), accedi al tuo account Tailscale e approva la scheda. Questa pagina si aggiorna da sola.
-<a class="authlink value" id="accLinkA" target="_blank" rel="noopener noreferrer" href="#"></a><div class="buttonrow"><button class="quiet" id="accCopy" type="button">Copia link</button></div></div>
+<p>[[acc.not_connected]]</p>
+<div class="radioopts"><label><input type="radio" name="accMode" id="accModeUrl" value="url" checked> [[acc.mode_link]]</label><label><input type="radio" name="accMode" id="accModeKey" value="key"> [[acc.mode_key]]</label></div>
+<form id="accForm" autocomplete="off"><div class="formgrid"><div class="field"><label for="accName">[[acc.name]]</label><input id="accName" type="text" placeholder="{{acc.name_ph}}" spellcheck="false" maxlength="63" autocomplete="off" autocapitalize="none" autocorrect="off"></div></div>
+<div id="accKeyFields" class="hidden"><div class="formgrid"><div class="field"><label for="accKey">[[acc.key]]</label><input id="accKey" type="password" placeholder="tskey-auth-..." autocomplete="off" spellcheck="false" maxlength="220"></div>
+<div class="field"><label for="accTagsIn">[[acc.tags]]</label><input id="accTagsIn" type="text" placeholder="{{acc.tags_ph}}" spellcheck="false" autocomplete="off" autocapitalize="none" autocorrect="off"></div></div>
+<p class="passwordinfo">[[acc.key_help]]</p></div>
+<div class="buttonrow"><button class="action" id="accGo" type="submit">[[acc.go_link]]</button><span id="accMsg" class="netmessage" role="status"></span></div></form>
+<div id="accLink" class="notice" hidden>[[acc.link_open]]
+<a class="authlink value" id="accLinkA" target="_blank" rel="noopener noreferrer" href="#"></a><div class="buttonrow"><button class="quiet" id="accCopy" type="button">[[acc.copy]]</button></div></div>
 </div></section>
-<div class="columns"><section class="card" id="routes"><h2 class="subhead">Configurazione di rete</h2><p>Configura le rotte pubblicate su Tailscale. La configurazione dell’indirizzo Ethernet (DHCP o IP statico) è gestita nella sezione dedicata qui sotto.</p>
-<form id="settings"><strong>Modalità di pubblicazione</strong>
-<div class="radioopts"><label><input name="routeMode" type="radio" id="routeOff" value="off" checked> Nessuna LAN</label>
-<label><input name="routeMode" type="radio" id="routeAll" value="all"> Intera subnet</label>
-<label><input name="routeMode" type="radio" id="routeSelected" value="selected"> Solo dispositivi selezionati</label></div>
-<div class="field"><label for="subnets">Subnet IPv4 (CIDR) — modalità Intera subnet</label><input id="subnets" type="text" spellcheck="false" placeholder="192.168.1.0/24"><small>Massimo 4 subnet private. Nella modalità Dispositivi vengono pubblicati soltanto i singoli IP /32 scelti sotto.</small></div>
-<div class="tgl"><div><strong>SNAT / Masquerading</strong><span>Consigliato: i dispositivi LAN vedono l'IP dell'Orange Pi</span></div><input class="switch" id="snat" type="checkbox" aria-label="SNAT"></div>
-<div class="tgl"><div><strong>Accetta rotte da Tailscale</strong><span>Abilita l'utilizzo di subnet pubblicate da altri nodi</span></div><input class="switch" id="accept_routes" type="checkbox" aria-label="Accetta rotte"></div>
-<div class="tgl"><div><strong>Utilizza DNS di Tailscale</strong><span>Applica a questo Orange Pi le impostazioni DNS della tailnet</span></div><input class="switch" id="accept_dns" type="checkbox" aria-label="DNS Tailscale"></div>
-<div class="tgl"><div><strong>Aggiornamenti automatici</strong><span>Consenti a Tailscale di aggiornarsi automaticamente (canale corrente)</span></div><input class="switch" id="auto_update" type="checkbox" aria-label="Aggiornamenti automatici Tailscale"></div>
-<div class="footer"><button id="save" class="action" type="submit">Salva configurazione</button><span id="message" role="status"></span></div></form></section>
-<aside class="card"><h2 class="subhead">Stato e informazioni</h2><p>La modifica delle rotte non interrompe il collegamento Tailscale del dispositivo. In modalità selettiva il firewall LAN blocca il forwarding verso gli IP non scelti.</p>
-<p><strong>IP forwarding:</strong> <span id="forwarding">-</span></p><p><strong>Versione:</strong> <span id="version">-</span></p>
-<p><strong>Modalità Ethernet (Armbian):</strong> <span class="value" id="dhcp">-</span></p>
-   <p><strong>Gateway LAN:</strong> <span class="value" id="gateway">-</span></p>
-   <p><strong>Nome locale:</strong><br><span class="value" id="webname">-</span></p>
-   <p><strong>Subnet rilevata:</strong><br><span class="value" id="detected">-</span></p>
-   <button class="quiet" id="useDetected" type="button">Usa subnet rilevata</button>
-<button class="quiet" id="refresh" type="button">Aggiorna stato</button>
-<div class="notice">Dopo aver pubblicato una subnet, verifica l'approvazione su <a href="https://login.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Tailscale Admin → Machines</a>. Senza approvazione la rete non diventa raggiungibile.</div>
-<div class="notice">Questo pannello non è destinato a Internet pubblico: non aprire la porta TCP 8443 sul router.</div></aside></div>
-<section class="card discoverycard" id="lanDiscovery"><h2 class="subhead">LAN Device Discovery</h2>
-<p>Scanner ARP della sola rete Ethernet locale: rileva IP, MAC, produttore e hostname se risolvibile. Seleziona i dispositivi da pubblicare come rotte /32. La scansione non modifica le rotte.</p>
-<div class="buttonrow"><button class="quiet" id="scanLan" type="button">Scansiona dispositivi LAN</button><span id="scanMsg" class="netmessage" role="status"></span></div>
-<div id="scanMeta" class="scanmeta">Nessuna scansione eseguita.</div>
+<div class="columns"><section class="card" id="routes"><h2 class="subhead">[[routes.title]]</h2><p>[[routes.intro]]</p>
+<form id="settings"><strong>[[routes.mode]]</strong>
+<div class="radioopts"><label><input name="routeMode" type="radio" id="routeOff" value="off" checked> [[routes.off]]</label>
+<label><input name="routeMode" type="radio" id="routeAll" value="all"> [[routes.all]]</label>
+<label><input name="routeMode" type="radio" id="routeSelected" value="selected"> [[routes.selected]]</label></div>
+<div class="field"><label for="subnets">[[routes.subnets]]</label><input id="subnets" type="text" spellcheck="false" placeholder="192.168.1.0/24"><small>[[routes.subnets_help]]</small></div>
+<div class="tgl"><div><strong>[[routes.snat]]</strong><span>[[routes.snat_help]]</span></div><input class="switch" id="snat" type="checkbox" aria-label="SNAT"></div>
+<div class="tgl"><div><strong>[[routes.accept]]</strong><span>[[routes.accept_help]]</span></div><input class="switch" id="accept_routes" type="checkbox" aria-label="{{routes.accept}}"></div>
+<div class="tgl"><div><strong>[[routes.dns]]</strong><span>[[routes.dns_help]]</span></div><input class="switch" id="accept_dns" type="checkbox" aria-label="{{routes.dns}}"></div>
+<div class="tgl"><div><strong>[[routes.update]]</strong><span>[[routes.update_help]]</span></div><input class="switch" id="auto_update" type="checkbox" aria-label="{{routes.update}}"></div>
+<div class="footer"><button id="save" class="action" type="submit">[[routes.save]]</button><span id="message" role="status"></span></div></form></section>
+<aside class="card"><h2 class="subhead">[[info.title]]</h2><p>[[info.intro]]</p>
+<p><strong>[[info.forwarding]]</strong> <span id="forwarding">-</span></p><p><strong>[[info.version]]</strong> <span id="version">-</span></p>
+<p><strong>[[info.ethmode]]</strong> <span class="value" id="dhcp">-</span></p>
+<p><strong>[[info.gateway]]</strong> <span class="value" id="gateway">-</span></p>
+<p><strong>[[info.localname]]</strong><br><span class="value" id="webname">-</span></p>
+<p><strong>[[info.detected]]</strong><br><span class="value" id="detected">-</span></p>
+<button class="quiet" id="useDetected" type="button">[[info.use_detected]]</button>
+<button class="quiet" id="refresh" type="button">[[info.refresh]]</button>
+<div class="notice">[[info.approve]]</div>
+<div class="notice">[[info.public_warning]]</div></aside></div>
+<section class="card discoverycard" id="lanDiscovery"><h2 class="subhead">[[lan.title]]</h2>
+<p>[[lan.intro]]</p>
+<div class="buttonrow"><button class="quiet" id="scanLan" type="button">[[lan.scan]]</button><span id="scanMsg" class="netmessage" role="status"></span></div>
+<div id="scanMeta" class="scanmeta">[[lan.none]]</div>
 <div id="deviceList" class="devlist"></div>
-<div class="notice">La selezione è basata sull’<strong>IP</strong>: MAC e hostname servono solo per riconoscere il dispositivo. Per NVR/RAPTOR usa IP statici o prenotazioni DHCP. Le rotte /32 richiedono approvazione Tailscale; per il controllo completo degli accessi servono anche le regole Grants/ACL.</div>
+<div class="notice">[[lan.note]]</div>
 </section>
-<section class="card networkcard" id="ethernet"><h2 class="subhead">Rete Ethernet · DHCP / IP statico</h2>
-<p>Configurazione persistente di <strong>end0</strong>. Un cambiamento di IP può interrompere temporaneamente SSH e questa pagina. Devi riconnetterti e premere <strong>Conferma configurazione</strong> entro 150 secondi, altrimenti viene tentato il ripristino automatico della configurazione precedente.</p>
-<form id="networkForm"><div class="radioopts"><label><input type="radio" name="netmode" id="modeDhcp" value="dhcp" checked> DHCP automatico</label><label><input type="radio" name="netmode" id="modeStatic" value="static"> IP statico</label></div>
+<section class="card networkcard" id="ethernet"><h2 class="subhead">[[eth.title]]</h2>
+<p>[[eth.intro]]</p>
+<form id="networkForm"><div class="radioopts"><label><input type="radio" name="netmode" id="modeDhcp" value="dhcp" checked> [[eth.dhcp]]</label><label><input type="radio" name="netmode" id="modeStatic" value="static"> [[eth.static]]</label></div>
 <div id="staticFields" class="hidden"><div class="formgrid">
-<div class="field"><label for="staticIp">Indirizzo IP Orange Pi</label><input type="text" id="staticIp" placeholder="192.168.1.200" spellcheck="false"></div>
-<div class="field"><label for="staticPrefix">Prefisso subnet (CIDR)</label><input id="staticPrefix" type="number" min="8" max="30" value="24"></div>
-<div class="field"><label for="staticGateway">Gateway / Router</label><input id="staticGateway" type="text" placeholder="192.168.1.1" spellcheck="false"></div>
-<div class="field"><label for="staticDns">DNS (separati da virgola)</label><input id="staticDns" type="text" placeholder="192.168.1.1, 1.1.1.1" spellcheck="false"></div>
-</div></div><div class="buttonrow"><button class="action" type="submit" id="applyNetwork">Applica modifica rete</button><span id="networkMessage" class="netmessage" role="status"></span></div></form>
-<div id="pendingBox" class="notice hidden"><strong class="dangerlabel">Modifica temporanea da confermare.</strong>
-<p>Apri nuovamente il pannello dal nuovo indirizzo e premi il pulsante qui sotto. Se il browser non trova la rete, attendi il ripristino automatico.</p>
-<p><strong>Nuovo indirizzo previsto:</strong> <a id="newAddress" href="#" target="_blank" rel="noopener noreferrer"></a></p>
-<p><strong>Scadenza:</strong> <span id="pendingCountdown">-</span></p>
-<button id="confirmNetwork" type="button" class="action">Conferma configurazione</button>
+<div class="field"><label for="staticIp">[[eth.ip]]</label><input type="text" id="staticIp" placeholder="192.168.1.200" spellcheck="false"></div>
+<div class="field"><label for="staticPrefix">[[eth.prefix]]</label><input id="staticPrefix" type="number" min="8" max="30" value="24"></div>
+<div class="field"><label for="staticGateway">[[eth.gateway]]</label><input id="staticGateway" type="text" placeholder="192.168.1.1" spellcheck="false"></div>
+<div class="field"><label for="staticDns">[[eth.dns]]</label><input id="staticDns" type="text" placeholder="192.168.1.1, 1.1.1.1" spellcheck="false"></div>
+</div></div><div class="buttonrow"><button class="action" type="submit" id="applyNetwork">[[eth.apply]]</button><span id="networkMessage" class="netmessage" role="status"></span></div></form>
+<div id="pendingBox" class="notice hidden"><strong class="dangerlabel">[[eth.pending_title]]</strong>
+<p>[[eth.pending_text]]</p>
+<p><strong>[[eth.new_address]]</strong> <a id="newAddress" href="#" target="_blank" rel="noopener noreferrer"></a></p>
+<p><strong>[[eth.expires]]</strong> <span id="pendingCountdown">-</span></p>
+<button id="confirmNetwork" type="button" class="action">[[eth.confirm]]</button>
 </div>
-<div class="notice">Prima di impostare un IP statico, scegli un indirizzo <strong>libero e fuori dal pool DHCP</strong> del router del cliente, per evitare conflitti. Dopo il cambio, Tailscale ristabilisce la connessione; la pubblicazione di una subnet differente va aggiornata e approvata separatamente.</div>
+<div class="notice">[[eth.note]]</div>
 </section>
-<section class="card securitycard" id="security"><h2 class="subhead">Sicurezza · Cambia password</h2>
-<p>Modifica la password di accesso alla Web UI. La password attuale è obbligatoria. Dopo il cambio tutte le sessioni aperte (anche su altri dispositivi) vengono chiuse e dovrai effettuare nuovamente l’accesso.</p>
+<section class="card securitycard" id="security"><h2 class="subhead">[[sec.title]]</h2>
+<p>[[sec.intro]]</p>
 <form id="passwordForm" autocomplete="on"><div class="formgrid">
-<div class="field"><label for="oldPassword">Password attuale</label><input id="oldPassword" type="password" autocomplete="current-password" required></div>
-<div class="field"><label for="newPassword">Nuova password</label><input id="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
-<div class="field"><label for="repeatPassword">Conferma nuova password</label><input id="repeatPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
-</div><div class="passwordinfo">Minimo 12 caratteri, con almeno una maiuscola, una minuscola e un numero. Simboli facoltativi. È consigliata una password lunga e univoca.</div>
-<div class="footer"><button class="action" id="changePassword" type="submit">Cambia password</button><span id="passwordMessage" role="status"></span></div>
+<div class="field"><label for="oldPassword">[[sec.current]]</label><input id="oldPassword" type="password" autocomplete="current-password" required></div>
+<div class="field"><label for="newPassword">[[sec.new]]</label><input id="newPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+<div class="field"><label for="repeatPassword">[[sec.repeat]]</label><input id="repeatPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
+</div><div class="passwordinfo">[[sec.rules]]</div>
+<div class="footer"><button class="action" id="changePassword" type="submit">[[sec.change]]</button><span id="passwordMessage" role="status"></span></div>
 </form></section>
-<section class="card eventscard" id="events"><h2 class="subhead">Eventi · Riavvii e stato del sistema</h2>
-<p>Registro conservato sulla scheda (anche dopo uno spegnimento): avvii, spegnimenti regolari e <strong>spegnimenti anomali</strong>, cioè mancanza di corrente o blocco. Gli orari sono quelli del tuo computer.</p>
-<div id="eventsSummary" class="scanmeta">Caricamento...</div>
-<div class="buttonrow"><button class="quiet" id="refreshEvents" type="button">Aggiorna eventi</button><span id="eventsMsg" class="netmessage" role="status"></span></div>
+<section class="card eventscard" id="events"><h2 class="subhead">[[ev.title]]</h2>
+<p>[[ev.intro]]</p>
+<div id="evBar" class="evbar"></div>
+<div id="eventsSummary" class="scanmeta">[[ev.loading]]</div>
+<div class="buttonrow"><button class="quiet" id="refreshEvents" type="button">[[ev.refresh]]</button><span id="eventsMsg" class="netmessage" role="status"></span></div>
 <div id="eventsList" class="devlist"></div>
-<div class="notice">Senza batteria la scheda parte con l’orologio indietro finché non si sincronizza con Internet: finché non compare “Orologio sincronizzato”, gli orari dell’ultimo avvio possono essere sbagliati. Dopo una mancanza di corrente, l’ultimo segno di vita indica entro quando è avvenuta (al massimo 5 minuti prima).</div>
+<div class="notice">[[ev.note]]</div>
 </section></main>
 <script>
+
 const csrf = '__CSRF__';
+const I18N=__I18N__;
+const T=(k,v)=>{const s=I18N.ui[k];if(s===undefined)return k;return v?s.replace(/[{]([A-Za-z_]+)[}]/g,(m,n)=>(n in v)?v[n]:m):s;};
+const has=k=>Object.prototype.hasOwnProperty.call(I18N.ui,k);
+function S(m){
+ if(typeof m!=='string')return m;
+ const d=I18N.server;if(Object.prototype.hasOwnProperty.call(d,m))return d[m];
+ for(const k in d){
+  if(k.indexOf('%s')>=0||k.indexOf('%d')>=0){
+   const re=new RegExp('^'+k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/%s/g,'([\\s\\S]+?)').replace(/%d/g,'(\\d+)')+'$');
+   const x=re.exec(m);if(x){let i=0;return d[k].replace(/%[sd]/g,()=>x[++i]);}
+  }else if((k.endsWith(': ')||k.endsWith('. '))&&m.startsWith(k))return d[k]+m.slice(k.length);
+ }
+ return m;
+}
+function plural(n,key){return T(key+(n===1?'_one':'_other'));}
 const $ = id => document.getElementById(id);
 const boolFields = ['snat','accept_routes','accept_dns','auto_update'];
 let selectedHosts = new Set();
@@ -610,20 +681,20 @@ let detectedSubnet = '';
 let first = true;
 async function refresh(){
  try {
-  const response=await fetch('/api/status',{cache:'no-store'}); if(!response.ok)throw Error('Sessione scaduta: ricarica la pagina');
+  const response=await fetch('/api/status',{cache:'no-store'}); if(!response.ok)throw Error(T('js.session_expired'));
   const data=await response.json(); const s=data.settings;
   renderAccount(data);
   $('tailnet').textContent=data.tailnet;
   $('tsip').textContent=data.tailscale_ip; $('hostname').textContent=data.hostname;
   $('lanip').textContent=data.lan.ip; $('interface').textContent=data.lan.device;
   detectedSubnet=data.lan.subnet||'';
-  $('detected').textContent=detectedSubnet||'Non rilevata';
-  $('dhcp').textContent=(data.network && data.network.mode==='static')?'IP statico':(data.lan.dhcp||'DHCP (da verificare)');
+  $('detected').textContent=detectedSubnet||T('info.not_detected');
+  $('dhcp').textContent=(data.network && data.network.mode==='static')?T('info.static_ip'):(data.lan.dhcp?S(data.lan.dhcp):T('info.dhcp_unknown'));
   $('gateway').textContent=data.lan.gateway||'-';
   $('webname').textContent=data.lan.web_name||'-';
   if (s.mode==='all' && detectedSubnet && s.subnets && !s.subnets.split(',').map(x=>x.trim()).includes(detectedSubnet))
-    msg('Attenzione: la rete pubblicata non coincide con la LAN corrente. Verifica prima di salvare.',true);
-  $('forwarding').textContent=data.forwarding?'Attivo':'Non attivo'; $('version').textContent=data.version;
+    msg(T('routes.mismatch'),true);
+  $('forwarding').textContent=data.forwarding?T('info.on'):T('info.off'); $('version').textContent=data.version;
   if(first){
     boolFields.forEach(id=>$(id).checked=!!s[id]);
     $('subnets').value=s.subnets||data.lan.subnet;
@@ -633,20 +704,20 @@ async function refresh(){
     renderDevices();first=false;
   }
   netData(data.network,data.lan);
-  if(data.error)msg(data.error,true);
+  if(data.error)msg(S(data.error),true);
  } catch(e){msg(e.message,true)}
 }
 function escapeHtml(t){return String(t).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function msg(t,error){$('message').textContent=t;$('message').className=error?'err':'ok'}
 $('settings').addEventListener('submit',async e=>{
- e.preventDefault();$('save').disabled=true;msg('Applicazione in corso...',false);
+ e.preventDefault();$('save').disabled=true;msg(T('routes.applying'),false);
  const payload=Object.fromEntries(boolFields.map(id=>[id,$(id).checked]));
  payload.mode=$('routeAll').checked?'all':$('routeSelected').checked?'selected':'off';
  payload.subnets=$('subnets').value.trim();payload.selected_hosts=[...selectedHosts];
- if(payload.mode==='selected' && !payload.selected_hosts.length){msg('Seleziona almeno un dispositivo dalla scansione LAN.',true);$('save').disabled=false;return;}
+ if(payload.mode==='selected' && !payload.selected_hosts.length){msg(T('routes.pick_one'),true);$('save').disabled=false;return;}
  try {const response=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(payload)});
- const result=await response.json();if(!response.ok)throw Error(result.error||'Errore non specificato');
- msg('Impostazioni applicate. Controlla le rotte nel pannello Tailscale.',false);
+ const result=await response.json();if(!response.ok)throw Error(S(result.error)||T('routes.unspecified'));
+ msg(T('routes.applied'),false);
  first=true;await refresh();
  }catch(error){msg(error.message,true)}finally{$('save').disabled=false;}
 });
@@ -654,38 +725,38 @@ function renderDevices(){
  const list=$('deviceList');list.replaceChildren();
  const seen=new Set(discovered.map(d=>d.ip));
  const rows=[...discovered];
- for(const ip of selectedHosts){if(!seen.has(ip))rows.push({ip,hostname:'Non rilevato nell’ultima scansione',mac:'-',vendor:'-'});}
+ for(const ip of selectedHosts){if(!seen.has(ip))rows.push({ip,hostname:T('lan.not_seen'),mac:'-',vendor:'-'});}
  for(const d of rows){
    const row=document.createElement('label');row.className='device';
    const check=document.createElement('input');check.type='checkbox';check.checked=selectedHosts.has(d.ip);
    check.addEventListener('change',()=>{if(check.checked)selectedHosts.add(d.ip);else selectedHosts.delete(d.ip);renderScanMeta();});
    const info=document.createElement('div');info.className='deviceinfo';
-   const title=document.createElement('strong');title.textContent=d.hostname&&d.hostname!=='-'?d.hostname:'Dispositivo LAN';
-   const address=document.createElement('small');address.textContent='IP '+d.ip+' · MAC '+(d.mac||'-');
-   const vendor=document.createElement('small');vendor.textContent='Produttore: '+(d.vendor||'-');
+   const title=document.createElement('strong');title.textContent=d.hostname&&d.hostname!=='-'?d.hostname:T('lan.device');
+   const address=document.createElement('small');address.textContent=T('lan.ipmac',{ip:d.ip,mac:d.mac||'-'});
+   const vendor=document.createElement('small');vendor.textContent=T('lan.vendor',{v:d.vendor||'-'});
    info.append(title,address,vendor);row.append(check,info);list.append(row);
  }
  renderScanMeta();
 }
 function renderScanMeta(){
- $('scanMeta').textContent=discovered.length+' dispositivi rilevati · '+selectedHosts.size+' selezionati';
+ $('scanMeta').textContent=T('lan.count',{found:discovered.length,sel:selectedHosts.size});
 }
 $('scanLan').addEventListener('click', async()=>{
- $('scanLan').disabled=true;$('scanMsg').textContent='Scansione in corso...';$('scanMsg').className='netmessage';
+ $('scanLan').disabled=true;$('scanMsg').textContent=T('lan.scanning');$('scanMsg').className='netmessage';
  try{
    const resp=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({action:'scan'})});
-   const data=await resp.json();if(!resp.ok)throw Error(data.error||'Scansione non riuscita');
+   const data=await resp.json();if(!resp.ok)throw Error(S(data.error)||T('lan.failed'));
    discovered=data.devices||[];renderDevices();
-   $('scanMsg').textContent='Scansione completata: '+data.subnet;
-   if(data.limited||data.hostname_limited)$('scanMsg').textContent+=' (alcuni risultati o nomi limitati)';
+   $('scanMsg').textContent=T('lan.done',{subnet:data.subnet});
+   if(data.limited||data.hostname_limited)$('scanMsg').textContent+=T('lan.limited');
    $('scanMsg').className='netmessage ok';
  }catch(error){$('scanMsg').textContent=error.message;$('scanMsg').className='netmessage err';}
  finally{$('scanLan').disabled=false;}
 });
 $('useDetected').onclick=()=>{
- if(!detectedSubnet){msg('Nessuna subnet Ethernet rilevata.',true);return;}
+ if(!detectedSubnet){msg(T('info.no_subnet'),true);return;}
  $('subnets').value=detectedSubnet;
- msg('Rete rilevata inserita: premi Salva configurazione per applicarla.',false);
+ msg(T('info.detected_set'),false);
 };
 $('refresh').onclick=()=>{first=true;refresh()};
 let netLoaded=false;
@@ -699,13 +770,13 @@ function showPending(p){
   if(p){pendingId=p.id;
     const url=p.mode==='static'?'https://'+p.ip+':8443':'https://orangepizero.local:8443';
     $('newAddress').textContent=url;$('newAddress').href=url;
-    $('pendingCountdown').textContent=Math.max(0,p.expires_at-Math.floor(Date.now()/1000))+' secondi';
+    $('pendingCountdown').textContent=T('eth.seconds',{n:Math.max(0,p.expires_at-Math.floor(Date.now()/1000))});
   }else pendingId='';
 }
 function netData(n,lan){
   if(!n)return;
   $('applyNetwork').disabled=!n.supported||!!n.pending;
-  if(!n.supported)netMsg('Modifica IP non disponibile: '+(n.reason||'gestore di rete non compatibile'),true);
+  if(!n.supported)netMsg(T('eth.unsupported',{reason:n.reason?S(n.reason):T('eth.reason_default')}),true);
   if(!netLoaded){
     $('modeDhcp').checked=n.mode!=='static';$('modeStatic').checked=n.mode==='static';
     $('staticIp').value=n.ip||(lan && lan.ip!=='-'?lan.ip:'');$('staticPrefix').value=n.mode==='static'?n.prefix:((lan && lan.subnet)?Number(lan.subnet.split('/')[1]):24);
@@ -719,21 +790,21 @@ $('networkForm').addEventListener('submit',async e=>{
   const mode=$('modeStatic').checked?'static':'dhcp';
   const payload={mode,ip:$('staticIp').value.trim(),prefix:Number($('staticPrefix').value),
     gateway:$('staticGateway').value.trim(),dns:$('staticDns').value.split(',').map(x=>x.trim()).filter(Boolean)};
-  if(!window.confirm('Modificare ora la configurazione Ethernet? La connessione potrebbe interrompersi. Senza conferma entro 150 secondi verrà tentato il ripristino automatico.'))return;
+  if(!window.confirm(T('eth.confirm_start')))return;
   $('applyNetwork').disabled=true;
   try{
     const resp=await fetch('/api/network/start',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(payload)});
-    const data=await resp.json();if(!resp.ok)throw Error(data.error||'Errore modifica');
-    netMsg('Modifica programmata. Ricollegati dal nuovo indirizzo e premi Conferma.',false);
+    const data=await resp.json();if(!resp.ok)throw Error(S(data.error)||T('eth.change_failed'));
+    netMsg(T('eth.scheduled'),false);
     showPending({id:data.id,mode,ip:payload.ip,expires_at:data.expires_at});
-  }catch(e){netMsg(e.message,true);$('applyNetwork').disabled=false;}
+  }catch(e){netMsg(S(e.message),true);$('applyNetwork').disabled=false;}
 });
 $('confirmNetwork').onclick=async()=>{
   if(!pendingId)return;
   try{
     const resp=await fetch('/api/network/confirm',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({id:pendingId})});
-    const data=await resp.json();if(!resp.ok)throw Error(data.error||'Conferma fallita');
-    showPending(null);netMsg('Configurazione Ethernet confermata e salvata.',false);netLoaded=false;await refresh();
+    const data=await resp.json();if(!resp.ok)throw Error(S(data.error)||T('eth.confirm_failed'));
+    showPending(null);netMsg(T('eth.confirmed'),false);netLoaded=false;await refresh();
   }catch(e){netMsg(e.message,true);}
 };
 $('passwordForm').addEventListener('submit',async e=>{
@@ -741,21 +812,21 @@ $('passwordForm').addEventListener('submit',async e=>{
  const oldPassword=$('oldPassword').value, newPassword=$('newPassword').value, confirmPassword=$('repeatPassword').value;
  const message=$('passwordMessage');
  message.className='';
- if(newPassword!==confirmPassword){message.className='err';message.textContent='Le nuove password non corrispondono.';return;}
- if(newPassword.length<12||newPassword.length>128||!/[A-Z]/.test(newPassword)||!/[a-z]/.test(newPassword)||!/[0-9]/.test(newPassword)){message.className='err';message.textContent='Usa 12-128 caratteri con una maiuscola, una minuscola e un numero.';return;}
- if(!window.confirm('Confermi il cambio della password? Tutte le sessioni verranno disconnesse.'))return;
+ if(newPassword!==confirmPassword){message.className='err';message.textContent=T('sec.mismatch');return;}
+ if(newPassword.length<12||newPassword.length>128||!/[A-Z]/.test(newPassword)||!/[a-z]/.test(newPassword)||!/[0-9]/.test(newPassword)){message.className='err';message.textContent=T('sec.weak');return;}
+ if(!window.confirm(T('sec.confirm')))return;
  $('changePassword').disabled=true;
  try{
   const response=await fetch('/api/password',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({current_password:oldPassword,new_password:newPassword,confirm_password:confirmPassword})});
   const result=await response.json();
-  if(!response.ok)throw Error(result.error||'Cambio password non riuscito.');
-  $('passwordForm').reset();message.className='ok';message.textContent='Password aggiornata. Accesso nuovamente richiesto.';
+  if(!response.ok)throw Error(S(result.error)||T('sec.failed'));
+  $('passwordForm').reset();message.className='ok';message.textContent=T('sec.done');
   window.location.replace('/login');
  }catch(error){message.className='err';message.textContent=error.message;}
  finally{$('changePassword').disabled=false;}
 });
 setInterval(()=>{if(pendingId){refresh();}},6000);
-const BACKEND_LABELS={Running:'Collegato',NeedsLogin:'Accesso richiesto',NeedsMachineAuth:'In attesa di approvazione',Stopped:'Fermo',Starting:'Avvio in corso',NoState:'Avvio in corso'};
+const stateLabel=s=>has('state.'+s)?T('state.'+s):s;
 let accWaiting=false;
 function safeAuthUrl(u){try{const x=new URL(u);return x.protocol==='https:'&&/(^|[.])tailscale[.]com$/.test(x.hostname)&&x.pathname.startsWith('/a/')&&!x.username&&!x.password&&!x.port;}catch(e){return false;}}
 function accNote(t,error){$('accNote').textContent=t;$('accNote').className='netmessage '+(error?'err':'ok');}
@@ -763,7 +834,7 @@ function accMsg(t,error){$('accMsg').textContent=t;$('accMsg').className='netmes
 async function postJson(url,body){
  const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});
  let d={};try{d=await r.json();}catch(e){}
- if(!r.ok||d.ok===false)throw Error(d.error||'Operazione non riuscita.');
+ if(!r.ok||d.ok===false)throw Error(S(d.error)||T('acc.failed'));
  return d;
 }
 function showLink(url){
@@ -772,45 +843,45 @@ function showLink(url){
  return ok;
 }
 function renderAccount(d){
- const st=d.backend,down=st==='Non disponibile',connected=st==='Running',stopped=st==='Stopped';
+ const st=d.backend,down=st==='Unavailable',connected=st==='Running',stopped=st==='Stopped';
  const needsLogin=st==='NeedsLogin'||st==='NoState'||st==='Starting';
- $('accDown').hidden=!down;$('accDownWhy').textContent=down&&d.error?d.error:'';
+ $('accDown').hidden=!down;$('accDownWhy').textContent=down&&d.error?S(d.error):'';
  $('accConnected').hidden=!connected;$('accStopped').hidden=!stopped;
  $('accWait').hidden=st!=='NeedsMachineAuth';$('accLogin').hidden=!needsLogin;
  if(connected){
-  $('accTailnet').textContent=d.tailnet;$('accHost').textContent=d.hostname;
+  $('accConnectedText').innerHTML=T('acc.connected',{tailnet:escapeHtml(d.tailnet),host:escapeHtml(d.hostname)});
   const tags=Array.isArray(d.tags)?d.tags:[];$('accTagsRow').hidden=!tags.length;$('accTags').textContent=tags.join(', ');
  }
  const pending=needsLogin&&showLink(d.auth_url);
  if(!pending&&!needsLogin)$('accLink').hidden=true;
  accWaiting=pending||st==='NeedsMachineAuth'||st==='Starting';
- $('backend').innerHTML='<span class="dot '+(connected?'good':(down?'bad':''))+'"></span>'+escapeHtml(BACKEND_LABELS[st]||st);
+ $('backend').innerHTML='<span class="dot '+(connected?'good':(down?'bad':''))+'"></span>'+escapeHtml(stateLabel(st));
 }
 for(const id of ['accModeUrl','accModeKey'])$(id).addEventListener('change',()=>{
  const key=$('accModeKey').checked;$('accKeyFields').classList.toggle('hidden',!key);
- $('accGo').textContent=key?'Collega con la chiave':'Ottieni il link di accesso';accMsg('',false);
+ $('accGo').textContent=key?T('acc.go_key'):T('acc.go_link');accMsg('',false);
 });
 $('accForm').addEventListener('submit',async e=>{
  e.preventDefault();const key=$('accModeKey').checked;
- const body={mode:key?'key':'url',hostname:$('accName').value.trim()};
+ const body={mode:key?'key':'url',hostname:$('accName').value.trim().toLowerCase().replace(/^-+|-+$/g,'')};
  if(key){
-  body.key=$('accKey').value.trim();body.tags=$('accTagsIn').value.split(',').map(x=>x.trim()).filter(Boolean);
-  if(!body.key){accMsg('Inserisci la chiave di autenticazione.',true);return;}
+  body.key=$('accKey').value.trim();body.tags=$('accTagsIn').value.toLowerCase().split(',').map(x=>x.trim()).filter(Boolean);
+  if(!body.key){accMsg(T('acc.key_missing'),true);return;}
  }
- $('accGo').disabled=true;accMsg(key?'Collegamento in corso: può richiedere fino a un minuto...':'Richiesta del link in corso...',false);
+ $('accGo').disabled=true;accMsg(key?T('acc.connecting_key'):T('acc.requesting_link'),false);
  try{
   const r=await postJson('/api/tailscale/login',body);
-  if(r.auth_url){showLink(r.auth_url);accMsg('Link pronto: aprilo per completare l’accesso.',false);accWaiting=true;}
-  else{accMsg('Scheda collegata a Tailscale.',false);}
+  if(r.auth_url){showLink(r.auth_url);accMsg(T('acc.link_ready'),false);accWaiting=true;}
+  else{accMsg(T('acc.connected_ok'),false);}
   if(key)$('accKey').value='';
   await refresh();
  }catch(error){accMsg(error.message,true);}
  finally{$('accGo').disabled=false;}
 });
 $('accCopy').addEventListener('click',async()=>{
- try{await navigator.clipboard.writeText($('accLinkA').textContent);$('accCopy').textContent='Copiato';}
- catch(e){$('accCopy').textContent='Seleziona e copia a mano';}
- setTimeout(()=>{$('accCopy').textContent='Copia link';},2500);
+ try{await navigator.clipboard.writeText($('accLinkA').textContent);$('accCopy').textContent=T('acc.copied');}
+ catch(e){$('accCopy').textContent=T('acc.copy_manual');}
+ setTimeout(()=>{$('accCopy').textContent=T('acc.copy');},2500);
 });
 $('accLogout').addEventListener('click',()=>{$('accLogoutBox').hidden=false;$('accLogout').hidden=true;});
 $('accLogoutNo').addEventListener('click',()=>{$('accLogoutBox').hidden=true;$('accLogout').hidden=false;});
@@ -827,44 +898,74 @@ $('accConnect').addEventListener('click',async()=>{
  finally{$('accConnect').disabled=false;}
 });
 setInterval(()=>{if(accWaiting)refresh();},4000);
-const EVENT_LABELS={boot:'Avvio',shutdown:'Spegnimento',unclean_shutdown:'Spegnimento anomalo (corrente mancata o blocco)',clock_synced:'Orologio sincronizzato'};
-const PREV_LABELS={first_boot:'primo avvio registrato',clean_reboot:'dopo un riavvio regolare',clean_poweroff:'dopo uno spegnimento regolare',clean_halt:'dopo un arresto regolare',clean_unknown:'dopo uno spegnimento regolare',unclean:'dopo uno spegnimento anomalo',unknown:'stato precedente non leggibile'};
-const KIND_LABELS={reboot:'riavvio',poweroff:'spegnimento',halt:'arresto',unknown:'tipo non rilevato'};
-const fmtDate=e=>new Date(e*1000).toLocaleString('it-IT');
-function fmtSpan(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' g ':'')+(h||d?h+' h ':'')+m+' min';}
+const fmtDate=e=>new Date(e*1000).toLocaleString(I18N.locale);
+function fmtSpan(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' '+T('unit.d')+' ':'')+(h||d?h+' '+T('unit.h')+' ':'')+m+' '+T('unit.min');}
 function eventDetail(e){
  const parts=[];
- if(e.type==='boot'){parts.push(PREV_LABELS[e.previous]||'stato precedente sconosciuto');
-  if(e.clock_synced===false)parts.push('orario non ancora sincronizzato');
-  if(e.logged_late)parts.push('registrato a scheda già accesa (installazione)');}
- if(e.type==='shutdown')parts.push(KIND_LABELS[e.kind]||'tipo non rilevato');
- if(e.type==='unclean_shutdown'&&e.last_seen_epoch)parts.push('ultimo segno di vita: '+fmtDate(e.last_seen_epoch));
- if(e.type==='clock_synced'&&typeof e.jump_seconds==='number')parts.push('correzione dell’orologio: '+e.jump_seconds+' s');
+ if(e.type==='boot'){parts.push(has('ev.prev.'+e.previous)?T('ev.prev.'+e.previous):T('ev.prev.other'));
+  if(e.clock_synced===false)parts.push(T('ev.detail.clock_unsynced'));
+  if(e.logged_late)parts.push(T('ev.detail.logged_late'));}
+ if(e.type==='shutdown')parts.push(has('ev.kind.'+e.kind)?T('ev.kind.'+e.kind):T('ev.kind.unknown'));
+ if(e.type==='unclean_shutdown'&&e.last_seen_epoch)parts.push(T('ev.detail.last_seen',{date:fmtDate(e.last_seen_epoch)}));
+ if(e.type==='clock_synced'&&typeof e.jump_seconds==='number')parts.push(T('ev.detail.clock_jump',{seconds:e.jump_seconds}));
  return parts.join(' · ');
+}
+function periodStarts(){
+ const now=new Date(),day=new Date(now.getFullYear(),now.getMonth(),now.getDate()),dow=(day.getDay()+6)%7;
+ return {today:day.getTime()/1000,week:new Date(day.getFullYear(),day.getMonth(),day.getDate()-dow).getTime()/1000,
+  month:new Date(now.getFullYear(),now.getMonth(),1).getTime()/1000,year:new Date(now.getFullYear(),0,1).getTime()/1000};
+}
+const countSince=(list,since)=>list.reduce((n,t)=>n+(t>=since?1:0),0);
+const PERIODS=[['today','stToday','stTodayPl','ev.bar_today'],['week','stWeek','stWeekPl','ev.bar_week'],['month','stMonth','stMonthPl','ev.bar_month'],['year','stYear','stYearPl','ev.bar_year']];
+function renderCounters(s){
+ const bar=$('evBar');bar.replaceChildren();
+ const restarts=s&&Array.isArray(s.restart_epochs)?s.restart_epochs:null,unclean=s&&Array.isArray(s.unclean_epochs)?s.unclean_epochs:[];
+ const starts=periodStarts();
+ for(const [k,numId,plId,label] of PERIODS){
+  if(!restarts){$(numId).textContent='-';$(plId).textContent='';continue;}
+  const n=countSince(restarts,starts[k]),u=countSince(unclean,starts[k]);
+  $(numId).textContent=n;$(plId).textContent=u?T('stat.unclean',{n:u}):T('stat.no_unclean');
+  const chip=document.createElement('div');chip.className='evchip'+(u?' hot':'');
+  const head=document.createElement('span');head.className='meta';head.textContent=T(label);
+  const text=document.createElement('strong');text.textContent=n?T('ev.bar_restarted',{n:n,times:plural(n,'count.time')}):T('ev.bar_none');
+  chip.append(head,text);
+  if(u){const sub=document.createElement('small');sub.textContent=T('ev.bar_unclean',{n:u});chip.append(sub);}
+  bar.append(chip);
+ }
 }
 async function loadEvents(){
  const list=$('eventsList'),sum=$('eventsSummary'),msg=$('eventsMsg');
- $('refreshEvents').disabled=true;msg.textContent='';
+ $('refreshEvents').disabled=true;$('statsRefresh').disabled=true;msg.textContent='';
  try{
   const response=await fetch('/api/events',{cache:'no-store'});
-  if(!response.ok)throw Error('Sessione scaduta: ricarica la pagina');
+  if(!response.ok)throw Error(T('js.session_expired'));
   const data=await response.json();list.replaceChildren();
-  if(!data.available){sum.textContent=data.reason||'Registro non disponibile.';return;}
+  if(!data.available){sum.textContent=data.reason?S(data.reason):T('ev.unavailable');renderCounters(null);$('statsUpdated').textContent=T('stat.unavailable');return;}
   const s=data.summary;
-  sum.textContent='In funzione da '+fmtSpan(s.uptime_seconds)+' (avvio: '+fmtDate(s.boot_epoch)+') · Avvii negli ultimi 30 giorni: '+s.boots_30d+' · Spegnimenti anomali negli ultimi 30 giorni: '+s.unclean_30d+(s.last_unclean_epoch?' (ultimo: '+fmtDate(s.last_unclean_epoch)+')':'');
-  if(!data.events.length){sum.textContent+=' · Nessun evento registrato.';}
+  sum.textContent=T('ev.summary',{span:fmtSpan(s.uptime_seconds),date:fmtDate(s.boot_epoch),boots:s.boots_30d,unclean:s.unclean_30d,
+   last:s.last_unclean_epoch?T('ev.summary_last',{date:fmtDate(s.last_unclean_epoch)}):''});
+  if(!data.events.length){sum.textContent+=T('ev.summary_none');}
+  renderCounters(s);
+  $('statsUpdated').textContent=T('stat.updated',{time:new Date().toLocaleTimeString(I18N.locale,{hour:'2-digit',minute:'2-digit'})});
   for(const e of data.events){
    const row=document.createElement('div');row.className='device'+(e.type==='unclean_shutdown'?' alertrow':'');
    const info=document.createElement('div');info.className='deviceinfo';
-   const title=document.createElement('strong');title.textContent=EVENT_LABELS[e.type]||e.type;
+   const title=document.createElement('strong');title.textContent=has('ev.type.'+e.type)?T('ev.type.'+e.type):e.type;
    const when=document.createElement('small');when.className='evtime';when.textContent=fmtDate(e.epoch);
    const detail=document.createElement('small');detail.textContent=eventDetail(e);
    info.append(title,when);if(detail.textContent)info.append(detail);row.append(info);list.append(row);
   }
- }catch(error){msg.textContent=error.message;msg.className='netmessage err';}
- finally{$('refreshEvents').disabled=false;}
+ }catch(error){msg.textContent=S(error.message);msg.className='netmessage err';}
+ finally{$('refreshEvents').disabled=false;$('statsRefresh').disabled=false;}
 }
 $('refreshEvents').addEventListener('click',loadEvents);
+$('statsRefresh').addEventListener('click',loadEvents);
+setInterval(()=>{if(!document.hidden)loadEvents();},60000);
+for(const id of ['accName','accTagsIn'])$(id).addEventListener('input',()=>{
+ const el=$(id),old=el.value;let v=old.toLowerCase();
+ if(id==='accName')v=v.replace(/[\s_]+/g,'-');
+ if(v!==old){const p=el.selectionStart;el.value=v;try{el.setSelectionRange(p,p);}catch(e){}}
+});
 refresh();
 loadEvents();
 </script>'''
@@ -983,10 +1084,18 @@ class Handler(BaseHTTPRequestHandler):
             SESSIONS.pop(key, None)
         return None
 
+    def _lang(self):
+        try:
+            raw = cookies.SimpleCookie()
+            raw.load(self.headers.get('Cookie', ''))
+            return CATALOG.pick(raw['lang'].value)
+        except (KeyError, cookies.CookieError):
+            return DEFAULT_LANG
+
     def _body(self):
         length = int(self.headers.get('Content-Length', '0'))
         if length <= 0 or length > 8192:
-            raise ValueError('Dimensione della richiesta non valida.')
+            raise ValueError('Invalid request size.')
         return self.rfile.read(length)
 
     def _csrf(self, session, token):
@@ -996,21 +1105,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == '/login':
-            return self._send(200, login_page())
+            return self._send(200, login_page(lang=self._lang()))
+        if path == '/lang':
+            wanted = parse_qs(urlparse(self.path).query).get('set', [''])[0]
+            cookie = 'lang=%s; Path=/; Max-Age=%d; HttpOnly; Secure; SameSite=Lax' % (CATALOG.pick(wanted), LANG_COOKIE_AGE)
+            return self._send(303, b'', headers={'Location': '/', 'Set-Cookie': cookie})
         if path == '/':
             session = self._session()
             if not session:
                 return self._send(303, b'', headers={'Location':'/login'})
-            return self._send(200, page(DASH.replace('__CSRF__', session['csrf'])))
+            return self._send(200, dashboard_page(session['csrf'], self._lang()))
         if path == '/api/status':
             if not self._session():
-                return self._json(401, {'error':'Accesso richiesto'})
+                return self._json(401, {'error':'Login required'})
             return self._json(200, status_data())
         if path == '/api/events':
             if not self._session():
-                return self._json(401, {'error':'Accesso richiesto'})
+                return self._json(401, {'error':'Login required'})
             return self._json(200, events_data())
-        return self._send(404, 'Non trovato', 'text/plain; charset=utf-8')
+        return self._send(404, 'Not found', 'text/plain; charset=utf-8')
 
     def do_POST(self):
         path = urlparse(self.path).path
@@ -1023,7 +1136,7 @@ class Handler(BaseHTTPRequestHandler):
                     limited = (len(FAILURES.get(client_ip, [])) >= LOGIN_FAILURES_PER_IP or
                                sum(len(v) for v in FAILURES.values()) >= LOGIN_FAILURES_GLOBAL)
                 if limited:
-                    return self._send(429, login_page('Troppi tentativi. Riprova più tardi.'))
+                    return self._send(429, login_page('login.too_many', self._lang()))
                 form = parse_qs(body.decode('utf-8'))
                 password = (form.get('password') or [''])[0]
                 # PBKDF2 (220.000 iterazioni) e' lento su Cortex-A7: va eseguito FUORI dal
@@ -1045,14 +1158,14 @@ class Handler(BaseHTTPRequestHandler):
                 if authenticated:
                     cookie = 'tspanel=%s; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict' % token
                     return self._send(303, b'', headers={'Location':'/', 'Set-Cookie':cookie})
-                return self._send(401, login_page('Password non valida.'))
+                return self._send(401, login_page('login.bad_password', self._lang()))
             session = self._session()
             if not session:
-                return self._json(401, {'error':'Sessione scaduta. Eseguire il login.'})
+                return self._json(401, {'error':'Session expired. Please log in.'})
             if path == '/logout':
                 form = parse_qs(body.decode('utf-8'))
                 if not self._csrf(session, (form.get('csrf') or [''])[0]):
-                    return self._send(403, 'CSRF non valido', 'text/plain')
+                    return self._send(403, 'Invalid CSRF token', 'text/plain')
                 jar = cookies.SimpleCookie()
                 jar.load(self.headers.get('Cookie', ''))
                 with LOCK:
@@ -1061,28 +1174,28 @@ class Handler(BaseHTTPRequestHandler):
                     'Set-Cookie':'tspanel=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict'})
             if path == '/api/password':
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-                    return self._json(415, {'error':'Content-Type non supportato'})
+                    return self._json(415, {'error':'Unsupported Content-Type'})
                 if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
-                    return self._json(403, {'error':'CSRF non valido'})
+                    return self._json(403, {'error':'Invalid CSRF token'})
                 payload = json.loads(body.decode('utf-8'))
                 if not isinstance(payload, dict) or set(payload) != {'current_password','new_password','confirm_password'}:
-                    raise ValueError('Campi password non validi.')
+                    raise ValueError('Invalid password fields.')
                 old = payload['current_password']
                 new = payload['new_password']
                 confirm = payload['confirm_password']
                 if not all(isinstance(x, str) for x in (old, new, confirm)):
-                    raise ValueError('Valori password non validi.')
+                    raise ValueError('Invalid password values.')
                 policy_error = password_error(new)
                 if policy_error:
                     raise ValueError(policy_error)
                 if new != confirm:
-                    raise ValueError('Le nuove password non coincidono.')
+                    raise ValueError('The new passwords do not match.')
                 with LOCK:
                     now = time.time()
                     attempts = [t for t in session['password_attempts'] if t > now - 900]
                     session['password_attempts'] = attempts
                     if len(attempts) >= 5:
-                        return self._json(429, {'error':'Troppi tentativi. Riprova fra 15 minuti.'})
+                        return self._json(429, {'error':'Too many attempts. Try again in 15 minutes.'})
                 # Come per il login: l'hash lento si calcola fuori dal LOCK globale.
                 version_before = password_version()
                 with HASH_SLOTS:
@@ -1091,11 +1204,11 @@ class Handler(BaseHTTPRequestHandler):
                     now = time.time()
                     if not old_is_valid:
                         session['password_attempts'].append(now)
-                        return self._json(403, {'error':'Password attuale non corretta.'})
+                        return self._json(403, {'error':'Current password is incorrect.'})
                     if version_before is None or not hmac.compare_digest(version_before, password_version() or b''):
-                        return self._json(409, {'error':'La password è stata modificata nel frattempo: accedi di nuovo.'})
+                        return self._json(409, {'error':'The password was changed in the meantime: log in again.'})
                     if hmac.compare_digest(old.encode('utf-8'), new.encode('utf-8')):
-                        raise ValueError('La nuova password deve essere diversa da quella attuale.')
+                        raise ValueError('The new password must be different from the current one.')
                     # Write first; revoke all sessions only if the new hash is saved.
                     write_password(new)
                     SESSIONS.clear()
@@ -1105,87 +1218,87 @@ class Handler(BaseHTTPRequestHandler):
                                   headers={'Set-Cookie':'tspanel=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict'})
             if path in ('/api/network/start','/api/network/confirm'):
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-                    return self._json(415, {'error':'Content-Type non supportato'})
+                    return self._json(415, {'error':'Unsupported Content-Type'})
                 if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
-                    return self._json(403, {'error':'CSRF non valido'})
+                    return self._json(403, {'error':'Invalid CSRF token'})
                 payload = json.loads(body.decode('utf-8'))
                 if not isinstance(payload,dict):
-                    raise ValueError('Richiesta rete non valida.')
+                    raise ValueError('Invalid network request.')
                 if path.endswith('/start'):
                     if set(payload) != {'mode','ip','prefix','gateway','dns'}:
-                        raise ValueError('Campi rete non validi.')
+                        raise ValueError('Invalid network fields.')
                     req={'action':'start','config':payload}
                 else:
                     if set(payload) != {'id'}:
-                        raise ValueError('Conferma non valida.')
+                        raise ValueError('Invalid confirmation.')
                     req={'action':'confirm','id':payload['id']}
                 proc=run(['/usr/bin/sudo','-n',NET_HELPER], timeout=28,
                          input_text=json.dumps(req))
                 result=read_json_from_string(proc.stdout)
                 if proc.returncode or not result.get('ok'):
-                    return self._json(400, {'error':str(result.get('error') or proc.stderr.strip() or 'Errore rete')[:500]})
+                    return self._json(400, {'error':str(result.get('error') or proc.stderr.strip() or 'Network error')[:500]})
                 return self._json(200,result)
             if path in ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect'):
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-                    return self._json(415, {'error':'Content-Type non supportato'})
+                    return self._json(415, {'error':'Unsupported Content-Type'})
                 if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
-                    return self._json(403, {'error':'CSRF non valido'})
+                    return self._json(403, {'error':'Invalid CSRF token'})
                 payload = json.loads(body.decode('utf-8'))
                 if not isinstance(payload, dict):
-                    raise ValueError('JSON non valido')
+                    raise ValueError('Invalid JSON')
                 if path == '/api/tailscale/login':
                     mode = payload.get('mode')
                     if mode not in ('url', 'key') or not set(payload) <= {'mode', 'hostname', 'key', 'tags'}:
-                        raise ValueError('Richiesta di accesso non valida.')
+                        raise ValueError('Invalid login request.')
                     request = {'action':'login_' + mode, 'hostname':payload.get('hostname', '')}
                     if mode == 'key':
                         request['key'] = payload.get('key')
                         request['tags'] = payload.get('tags', [])
                     elif set(payload) - {'mode', 'hostname'}:
-                        raise ValueError('Richiesta di accesso non valida.')
+                        raise ValueError('Invalid login request.')
                 else:
                     if payload:
-                        raise ValueError('Richiesta non valida.')
+                        raise ValueError('Invalid request.')
                     request = {'action':path.rsplit('/', 1)[1]}
                 result = tailscale_auth(request)
                 return self._json(200 if result['ok'] else 400, result)
             if path == '/api/scan':
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-                    return self._json(415, {'error':'Content-Type non supportato'})
+                    return self._json(415, {'error':'Unsupported Content-Type'})
                 if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
-                    return self._json(403, {'error':'CSRF non valido'})
+                    return self._json(403, {'error':'Invalid CSRF token'})
                 payload = json.loads(body.decode('utf-8'))
                 if payload != {'action':'scan'}:
-                    raise ValueError('Comando di scansione non valido')
+                    raise ValueError('Invalid scan command')
                 with LOCK:
                     now = time.monotonic()
                     if now - session.get('last_scan',-1000) < 15:
-                        return self._json(429, {'error':'Attendere 15 secondi tra le scansioni.'})
+                        return self._json(429, {'error':'Wait 15 seconds between scans.'})
                     session['last_scan'] = now
                 proc=run(['/usr/bin/sudo','-n',DISCOVERY_HELPER], timeout=34,
                          input_text=json.dumps(payload))
                 response=read_json_from_string(proc.stdout)
                 if proc.returncode or not response.get('ok'):
-                    return self._json(400, {'error':str(response.get('error') or proc.stderr.strip() or 'Errore scanner')[:450]})
+                    return self._json(400, {'error':str(response.get('error') or proc.stderr.strip() or 'Scanner error')[:450]})
                 return self._json(200, response)
             if path == '/api/apply':
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
-                    return self._json(415, {'error':'Content-Type non supportato'})
+                    return self._json(415, {'error':'Unsupported Content-Type'})
                 if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
-                    return self._json(403, {'error':'CSRF non valido'})
+                    return self._json(403, {'error':'Invalid CSRF token'})
                 payload = json.loads(body.decode('utf-8'))
                 if not isinstance(payload, dict):
-                    raise ValueError('JSON non valido')
+                    raise ValueError('Invalid JSON')
                 proc = run(['/usr/bin/sudo', '-n', HELPER], timeout=30,
                            input_text=json.dumps(payload))
                 response = read_json_from_string(proc.stdout)
                 if proc.returncode:
-                    return self._json(400, {'error':str(response.get('error') or proc.stderr.strip() or 'Errore applicazione')[:500]})
+                    return self._json(400, {'error':str(response.get('error') or proc.stderr.strip() or 'Apply error')[:500]})
                 save_state(payload)
                 return self._json(200, {'ok':True, 'result':response})
         except (ValueError, KeyError, TypeError, UnicodeError, subprocess.TimeoutExpired, OSError) as exc:
             return self._json(400, {'error':str(exc)[:350]})
-        return self._send(404, 'Non trovato', 'text/plain; charset=utf-8')
+        return self._send(404, 'Not found', 'text/plain; charset=utf-8')
 
 
 def read_json_from_string(text):
@@ -1204,15 +1317,15 @@ def main():
             sys.exit('Eseguire come root: sudo python3 ... --configure-password')
         import getpass
         if not os.isatty(0):
-            sys.exit('Serve un terminale interattivo SSH (TTY) per impostare la password.')
+            sys.exit('An interactive SSH terminal (TTY) is required to set the password.')
         for attempt in range(3):
             try:
-                password = getpass.getpass('Nuova password Web UI (minimo 12; maiuscola, minuscola e numero): ')
-                confirmation = getpass.getpass('Conferma password Web UI: ')
+                password = getpass.getpass('New Web UI password (minimum 12; uppercase, lowercase and a number): ')
+                confirmation = getpass.getpass('Confirm Web UI password: ')
             except (EOFError, KeyboardInterrupt):
                 sys.exit('\nImpostazione password annullata, nessuna credenziale modificata.')
             if password != confirmation:
-                print('Le password non coincidono. Riprova.')
+                print('The passwords do not match. Try again.')
                 continue
             policy_error = password_error(password)
             if policy_error:
@@ -1224,11 +1337,11 @@ def main():
                 ident = pwd.getpwnam('tspanel')
                 os.chown(AUTH_PATH, ident.pw_uid, ident.pw_gid)
             except KeyError:
-                sys.exit('Errore: utente di servizio tspanel non trovato')
+                sys.exit('Error: service user tspanel not found')
             os.chmod(AUTH_PATH, 0o600)
-            print('Password Web UI impostata correttamente (non visualizzata).')
+            print('Web UI password set successfully (not displayed).')
             return
-        sys.exit('Troppi tentativi: credenziali non modificate.')
+        sys.exit('Too many attempts: credentials unchanged.')
     if len(sys.argv) == 2 and sys.argv[1] == '--reset-password':
         if os.geteuid() != 0:
             sys.exit('Eseguire come root: sudo python3 ... --reset-password')
@@ -1242,7 +1355,7 @@ def main():
         print('Nuova password amministratore (salvare): ' + password)
         return
     if len(sys.argv) != 1:
-        sys.exit('Argomento non valido')
+        sys.exit('Invalid argument')
     # Service must be launched by a systemd socket bound to the Ethernet device.
     # Never bind a stand-alone 0.0.0.0 socket which would expose the admin UI
     # through tailscale0, Wi-Fi, or other interfaces.
@@ -1250,7 +1363,7 @@ def main():
         sys.exit('Il pannello deve essere avviato dal socket systemd tailscale-panel.socket')
     inherited = socket.socket(fileno=3)
     if inherited.family != socket.AF_INET or inherited.type & socket.SOCK_STREAM != socket.SOCK_STREAM:
-        sys.exit('Socket systemd incompatibile')
+        sys.exit('Incompatible systemd socket')
     httpd = Server(('0.0.0.0', PORT), Handler, bind_and_activate=False)
     httpd.socket.close()
     httpd.socket = inherited

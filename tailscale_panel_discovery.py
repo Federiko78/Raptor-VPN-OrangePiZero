@@ -25,11 +25,11 @@ def discover_network():
     with open(INTERFACE_FILE, encoding='ascii') as fd:
         dev = fd.read(80).strip()
     if not dev or len(dev) > 15 or any(not(c.isalnum() or c in '._-') for c in dev):
-        raise ValueError('Interfaccia Ethernet non valida')
+        raise ValueError('Invalid Ethernet interface')
     result = call(['/usr/sbin/ip' if os.path.exists('/usr/sbin/ip') else '/usr/bin/ip',
                    '-j','-4','addr','show','dev',dev], timeout=4)
     if result.returncode:
-        raise ValueError('Impossibile leggere la porta Ethernet')
+        raise ValueError('Unable to read the Ethernet port')
     interfaces = json.loads(result.stdout)
     for iface in interfaces:
         for item in iface.get('addr_info',[]):
@@ -39,9 +39,9 @@ def discover_network():
                 local = ipaddress.IPv4Address(item['local'])
                 net = ipaddress.IPv4Network('%s/%s' % (local,item['prefixlen']),strict=False)
                 if not net.is_private or net.num_addresses > 1024:
-                    raise ValueError('Scansione limitata a LAN private fino a /22 (1024 indirizzi)')
+                    raise ValueError('Scan limited to private LANs up to /22 (1024 addresses)')
                 return dev,local,net
-    raise ValueError('Nessun indirizzo IPv4 Ethernet rilevato')
+    raise ValueError('No Ethernet IPv4 address detected')
 
 
 def hostname(address):
@@ -65,17 +65,17 @@ def hostname(address):
 
 def main():
     if len(sys.argv)!=1 or os.geteuid()!=0:
-        raise ValueError('Accesso al discovery non autorizzato')
+        raise ValueError('Discovery access not authorised')
     raw=sys.stdin.buffer.read(129)
     if len(raw)>128 or json.loads(raw.decode('utf-8'))!={'action':'scan'}:
-        raise ValueError('Richiesta di scansione non valida')
+        raise ValueError('Invalid scan request')
     dev,local,net=discover_network()
     cmd=['/usr/sbin/arp-scan','--interface='+dev,'--plain','--retry=1',
          '--timeout=300','--interval=3',str(net)]
     outcome=call(cmd,timeout=22)
     # arp-scan returns 0 if successful. Never pretend the scan is empty on error.
     if outcome.returncode:
-        raise RuntimeError('arp-scan: '+(outcome.stderr or 'scansione non riuscita').strip()[:220])
+        raise RuntimeError('arp-scan: '+(outcome.stderr or 'scan failed').strip()[:220])
     entries={}
     for line in outcome.stdout.splitlines():
         found=IP_PATTERN.match(line)

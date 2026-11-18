@@ -48,7 +48,7 @@ def check_hostname(value):
     if value in (None, ''):
         return ''
     if not isinstance(value, str) or not HOST_RE.match(value) or value.endswith('-'):
-        raise Refused('Nome della scheda non valido: solo lettere minuscole, numeri e trattini (max 63).')
+        raise Refused('Invalid board name: lowercase letters, numbers and hyphens only (max 63).')
     return value
 
 
@@ -56,11 +56,11 @@ def check_tags(value):
     if value in (None, []):
         return []
     if not isinstance(value, list) or len(value) > MAX_TAGS:
-        raise Refused('Tag non validi (al massimo %d).' % MAX_TAGS)
+        raise Refused('Invalid tags (at most %d).' % MAX_TAGS)
     tags = []
     for tag in value:
         if not isinstance(tag, str) or not TAG_RE.match(tag):
-            raise Refused('Tag non valido: usare il formato tag:nome (minuscole, numeri, trattini).')
+            raise Refused('Invalid tag: use the format tag:name (lowercase, numbers, hyphens).')
         if tag not in tags:
             tags.append(tag)
     return tags
@@ -68,21 +68,21 @@ def check_tags(value):
 
 def check_key(value):
     if not isinstance(value, str) or not KEY_RE.match(value.strip()):
-        raise Refused('Chiave non valida: deve iniziare con tskey-auth- (o tskey-client-).')
+        raise Refused('Invalid key: it must start with tskey-auth- (or tskey-client-).')
     return value.strip()
 
 
 def validate(body):
     """Ritorna (azione, parametri) oppure solleva Refused."""
     if not isinstance(body, dict) or not isinstance(body.get('action'), str):
-        raise Refused('Richiesta non valida.')
+        raise Refused('Invalid request.')
     action = body['action']
     allowed = {'login_url': {'action', 'hostname'},
                'login_key': {'action', 'key', 'tags', 'hostname'},
                'connect': {'action'},
                'logout': {'action'}}.get(action)
     if allowed is None or not set(body) <= allowed:
-        raise Refused('Richiesta non valida.')
+        raise Refused('Invalid request.')
     if action in ('logout', 'connect'):
         return action, {}
     params = {'hostname': check_hostname(body.get('hostname'))}
@@ -139,7 +139,7 @@ def common_flags(params):
 def login_url(params):
     state, _ = backend_state()
     if state == 'Running':
-        raise Refused("La scheda è già collegata a Tailscale: scollegarla prima di cambiare account.")
+        raise Refused('The board is already connected to Tailscale: disconnect it before switching account.')
     code, text = run([TAILSCALE, 'login', '--timeout=' + LOGIN_URL_WAIT] + common_flags(params), 40)
     found = URL_RE.search(text)
     url = found.group(0) if found else ''
@@ -148,14 +148,14 @@ def login_url(params):
         if state == 'Running':
             return {'ok': True, 'connected': True}
     if not url:
-        raise Refused('Tailscale non ha restituito il link di accesso. ' + scrub(text))
+        raise Refused('Tailscale did not return the login link. ' + scrub(text))
     return {'ok': True, 'auth_url': url}
 
 
 def login_key(params):
     state, _ = backend_state()
     if state == 'Running':
-        raise Refused("La scheda è già collegata a Tailscale: scollegarla prima di usare una chiave.")
+        raise Refused('The board is already connected to Tailscale: disconnect it before using a key.')
     fd, path = tempfile.mkstemp(prefix='tskey-', dir=RUN_DIR)
     try:
         os.fchmod(fd, 0o600)
@@ -174,7 +174,7 @@ def login_key(params):
     if code != 0:
         state, _ = backend_state()
         if state != 'Running':
-            raise Refused('Accesso con chiave non riuscito: ' + (scrub(text, params['key']) or 'nessuna risposta da Tailscale.'))
+            raise Refused('Key login failed: ' + (scrub(text, params['key']) or 'no answer from Tailscale.'))
     return {'ok': True, 'connected': True}
 
 
@@ -191,13 +191,13 @@ def connect(_params):
     url = url or (found.group(0) if found else '')
     if url:
         return {'ok': True, 'auth_url': url}
-    raise Refused('Impossibile riattivare Tailscale: ' + (scrub(text) or 'nessuna risposta.'))
+    raise Refused('Unable to reactivate Tailscale: ' + (scrub(text) or 'no answer.'))
 
 
 def logout(_params):
     code, text = run([TAILSCALE, 'logout'], 30)
     if code != 0:
-        raise Refused('Scollegamento non riuscito: ' + (scrub(text) or 'nessuna risposta da Tailscale.'))
+        raise Refused('Disconnect failed: ' + (scrub(text) or 'no answer from Tailscale.'))
     return {'ok': True}
 
 
@@ -207,28 +207,28 @@ ACTIONS = {'login_url': login_url, 'login_key': login_key, 'connect': connect, '
 def main():
     try:
         if os.geteuid() != 0:
-            raise Refused('Questo programma deve essere eseguito come root.')
+            raise Refused('This program must run as root.')
         if len(sys.argv) != 1:
-            raise Refused('Argomenti non consentiti.')
+            raise Refused('Arguments not allowed.')
         raw = sys.stdin.buffer.read(MAX_BODY + 1)
         if len(raw) > MAX_BODY:
-            raise Refused('Richiesta troppo grande.')
+            raise Refused('Request too large.')
         try:
             body = json.loads(raw.decode('utf-8'))
         except ValueError:
-            raise Refused('Richiesta non valida.')
+            raise Refused('Invalid request.')
         action, params = validate(body)
         with open(LOCK_PATH, 'a+') as lock:
             os.fchmod(lock.fileno(), 0o600)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                raise Refused("Un accesso è già in corso: attendere qualche secondo.")
+                raise Refused('A login is already in progress: wait a few seconds.')
             result = ACTIONS[action](params)
     except Refused as exc:
         result = {'ok': False, 'error': str(exc)}
     except Exception:      # nessun dettaglio interno verso il pannello
-        result = {'ok': False, 'error': "Errore interno durante l'accesso a Tailscale."}
+        result = {'ok': False, 'error': 'Internal error while logging in to Tailscale.'}
     sys.stdout.write(json.dumps(result, ensure_ascii=False) + '\n')
     return 0 if result.get('ok') else 1
 

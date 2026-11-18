@@ -3,6 +3,8 @@
 Nel pannello, la scheda **Account Tailscale** sostituisce ogni comando da SSH (`tailscale up`, `tailscale logout`).
 Ci sono due modi per collegare una scheda nuova. Si sceglie nella scheda; il nome della scheda nella tailnet è facoltativo.
 
+Il nome della scheda e i tag accettano **solo minuscole**: la maiuscola non si può scrivere (viene trasformata subito), spazi e trattini bassi nel nome diventano `-`. La chiave di autenticazione non viene mai modificata.
+
 ## 1. Accedi con link
 
 1. Premi **Ottieni il link di accesso**.

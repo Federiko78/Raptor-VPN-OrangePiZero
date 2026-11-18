@@ -22,12 +22,16 @@ esac
 if [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
   echo "Scegliere una porta TCP fra 1024 e 65535" >&2; exit 1
 fi
-for src in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py; do
+for src in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py panel_i18n.py; do
   if [ ! -r "$DIR/$src" ]; then
     echo "Manca il file $DIR/$src: trasferire tutti i file nella stessa cartella." >&2
     exit 1
   fi
 done
+if [ ! -r "$DIR/i18n/en.json" ]; then
+  echo "Manca il file $DIR/i18n/en.json (lingua predefinita): trasferire anche la cartella i18n." >&2
+  exit 1
+fi
 if ! command -v systemctl >/dev/null 2>&1; then
   echo "ERRORE: questo installer richiede Debian con systemd." >&2; exit 1
 fi
@@ -103,6 +107,12 @@ fi
 install -m 644 -o root -g root "$DIR/tailscale_panel.py" "$APP/tailscale_panel.py"
 install -m 644 -o root -g root "$DIR/password_policy.py" "$APP/password_policy.py"
 install -m 644 -o root -g root "$DIR/panel_assets.py" "$APP/panel_assets.py"
+install -m 644 -o root -g root "$DIR/panel_i18n.py" "$APP/panel_i18n.py"
+# Lingue del pannello (un file JSON per lingua; en = predefinita): si aggiungono lingue copiando un file in i18n/.
+install -d -m 755 -o root -g root "$APP/i18n"
+for lang_file in "$DIR"/i18n/*.json; do
+  install -m 644 -o root -g root "$lang_file" "$APP/i18n/$(basename "$lang_file")"
+done
 install -m 755 -o root -g root "$DIR/tailscale_panel_helper.py" "$HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_network.py" "$NET_HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_discovery.py" "$DISCOVERY_HELPER"

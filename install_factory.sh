@@ -11,7 +11,7 @@ die() { printf '\nERRORE: %s\n' "$*" >&2; exit 1; }
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$BASE"
 command -v python3 >/dev/null 2>&1 || die 'python3 mancante: eseguire  apt-get update && apt-get install -y python3  (oppure usare bootstrap.sh)'
-for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py check_installation.sh backup_panel.sh restore_panel.sh; do
+for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py panel_i18n.py i18n/en.json i18n/it.json check_installation.sh backup_panel.sh restore_panel.sh; do
   [ -s "$f" ] || die "File mancante nel pacchetto: $f"
 done
 if [ -f SHA256SUMS ]; then
@@ -20,12 +20,15 @@ if [ -f SHA256SUMS ]; then
 fi
 
 say 'Preflight sorgenti (senza modifiche)'
-for module in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py raptor_ap.py raptor_eventlog.py; do
+for module in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py panel_i18n.py raptor_ap.py raptor_eventlog.py; do
   python3 - "$module" <<'PYCOMPILE' || die "Errore di sintassi in $module"
 import ast, sys
 with open(sys.argv[1], encoding='utf-8') as fd:
     ast.parse(fd.read(), filename=sys.argv[1])
 PYCOMPILE
+done
+for lang_file in i18n/*.json; do
+  python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$lang_file" || die "File lingua non valido: $lang_file"
 done
 for script in install_factory.sh install_tailscale_panel.sh install_access.sh install_eventlog.sh check_installation.sh backup_panel.sh restore_panel.sh; do
   sh -n "$script" || die "Errore sintassi Shell: $script"

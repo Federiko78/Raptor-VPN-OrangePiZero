@@ -31,7 +31,7 @@ EXPECTED = {'mode', 'subnets', 'selected_hosts', *BOOLEAN_KEYS}
 def run(argv, timeout=20, check=True):
     result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     if check and result.returncode:
-        raise RuntimeError((result.stderr or result.stdout or 'Comando non riuscito').strip()[:350])
+        raise RuntimeError((result.stderr or result.stdout or 'Command failed').strip()[:350])
     return result
 
 
@@ -42,7 +42,7 @@ def lan_interface():
     except OSError:
         dev = 'end0'
     if not (1 <= len(dev) <= 15 and all(c.isalnum() or c in '._-' for c in dev)):
-        raise ValueError('Interfaccia LAN non valida')
+        raise ValueError('Invalid LAN interface')
     return dev
 
 
@@ -60,23 +60,23 @@ def current_lan():
                 if not local.is_private or net.num_addresses < 4:
                     break
                 return dev, local, net
-    raise ValueError('Nessun IP IPv4 privato sulla porta Ethernet')
+    raise ValueError('No private IPv4 address on the Ethernet port')
 
 
 def validate_networks(value):
     if not isinstance(value, str) or len(value) > 255:
-        raise ValueError('Subnet IPv4 non valide')
+        raise ValueError('Invalid IPv4 subnets')
     parts = [v.strip() for v in value.split(',') if v.strip()]
     if not 1 <= len(parts) <= 4:
-        raise ValueError('Inserire da 1 a 4 subnet IPv4 private')
+        raise ValueError('Enter 1 to 4 private IPv4 subnets')
     valid = []
     for part in parts:
         try:
             net = ipaddress.ip_network(part, strict=True)
         except ValueError:
-            raise ValueError('Subnet non valida: %s (esempio 192.168.1.0/24)' % part)
+            raise ValueError('Invalid subnet: %s (example 192.168.1.0/24)' % part)
         if not isinstance(net, ipaddress.IPv4Network) or not any(net.subnet_of(x) for x in RFC1918):
-            raise ValueError('Sono consentite soltanto subnet IPv4 private RFC1918')
+            raise ValueError('Only private RFC1918 IPv4 subnets are allowed')
         if str(net) not in valid:
             valid.append(str(net))
     return valid
@@ -84,17 +84,17 @@ def validate_networks(value):
 
 def validate_selected(values, local, network):
     if not isinstance(values, list) or len(values) > MAX_SELECTED:
-        raise ValueError('Selezionare al massimo 64 indirizzi IPv4')
+        raise ValueError('Select at most 64 IPv4 addresses')
     selected = []
     for raw in values:
         if not isinstance(raw, str):
-            raise ValueError('Indirizzo dispositivo non valido')
+            raise ValueError('Invalid device address')
         try:
             ip = ipaddress.IPv4Address(raw)
         except ipaddress.AddressValueError:
-            raise ValueError('Indirizzo dispositivo non valido: %s' % raw[:50])
+            raise ValueError('Invalid device address: %s' % raw[:50])
         if ip not in network or ip in (local, network.network_address, network.broadcast_address):
-            raise ValueError('Il dispositivo %s non appartiene alla LAN o è l’Orange Pi' % ip)
+            raise ValueError('Device %s is not on the LAN or is the Orange Pi itself' % ip)
         if str(ip) not in selected:
             selected.append(str(ip))
     return sorted(selected, key=lambda ip: int(ipaddress.IPv4Address(ip)))
@@ -102,15 +102,15 @@ def validate_selected(values, local, network):
 
 def validate(data):
     if not isinstance(data, dict) or set(data) != EXPECTED:
-        raise ValueError('Parametri non consentiti')
+        raise ValueError('Parameters not allowed')
     if data['mode'] not in ('off', 'all', 'selected'):
-        raise ValueError('Modalità non valida')
+        raise ValueError('Invalid mode')
     for key in BOOLEAN_KEYS:
         if type(data[key]) is not bool:
-            raise ValueError('Valore booleano non valido: ' + key)
+            raise ValueError('Invalid boolean value: ' + key)
     dev, local, net = current_lan()
     if not isinstance(data['subnets'], str):
-        raise ValueError('Subnet IPv4 non valide')
+        raise ValueError('Invalid IPv4 subnets')
     networks = validate_networks(data['subnets']) if data['subnets'].strip() else []
     # Disabling access must remain possible even when old selected IPs refer
     # to a different customer's network. Validate their shape/size, but only
@@ -118,12 +118,12 @@ def validate(data):
     raw_hosts = data['selected_hosts']
     if not isinstance(raw_hosts, list) or len(raw_hosts) > MAX_SELECTED or not all(
             isinstance(v, str) and len(v) <= 15 for v in raw_hosts):
-        raise ValueError('Elenco dispositivi non valido (massimo 64 IP)')
+        raise ValueError('Invalid device list (maximum 64 IPs)')
     selected = validate_selected(raw_hosts, local, net) if data['mode'] == 'selected' else []
     if data['mode'] == 'all' and not networks:
-        raise ValueError('Inserire una subnet da pubblicare')
+        raise ValueError('Enter a subnet to publish')
     if data['mode'] == 'selected' and not selected:
-        raise ValueError('Selezionare almeno un dispositivo')
+        raise ValueError('Select at least one device')
     # Scan/selected mode operates only on the directly connected local subnet.
     return {'mode': data['mode'], 'subnets': ', '.join(networks),
             'selected_hosts': selected, **{key:data[key] for key in BOOLEAN_KEYS}}, dev
@@ -191,7 +191,7 @@ def guard_ip6(interface):
     if ip6t('-C', 'FORWARD', *args, check=False).returncode != 0:
         ip6t('-I', 'FORWARD', '1', *args)
     if ip6t('-C', 'FORWARD', *args, check=False).returncode != 0:
-        raise RuntimeError('Protezione IPv6 non installata')
+        raise RuntimeError('IPv6 protection not installed')
 
 
 def apply_guard(mode, selected, interface, subnets=''):
@@ -214,7 +214,7 @@ def apply_guard(mode, selected, interface, subnets=''):
     # Never flush a chain that is still referenced after an interrupted swap.
     # Leave the earlier restrictive rules intact and require reconciliation.
     if attached and any('-j' in rule and rule[rule.index('-j')+1] == target for rule in attached):
-        raise RuntimeError('Catene mangle duplicate: necessario controllo prima di aggiornare')
+        raise RuntimeError('Duplicate mangle chains: check needed before updating')
     if not attached:
         # First establish DENY before preparing anything that might allow LAN.
         ipt('-N', CHAIN_B, check=False)
@@ -224,7 +224,7 @@ def apply_guard(mode, selected, interface, subnets=''):
         active, target = CHAIN_B, CHAIN_A
     result = ipt('-N', target, check=False)
     if result.returncode not in (0,1):
-        raise RuntimeError('Impossibile creare la catena mangle')
+        raise RuntimeError('Unable to create the mangle chain')
     ipt('-F', target)
     if mode == 'selected':
         for address in selected:
@@ -233,7 +233,7 @@ def apply_guard(mode, selected, interface, subnets=''):
         for prefix in validate_networks(subnets):
             ipt('-A', target, '-d', prefix, '-j', 'RETURN')
     elif mode != 'off':
-        raise ValueError('Modalità firewall non supportata')
+        raise ValueError('Unsupported firewall mode')
     ipt('-A', target, '-j', 'DROP')
     ipt('-I', 'FORWARD', '1', '-i', 'tailscale0', '-o', interface, '-j', target)
     # The new jump is first; remove only older jumps to panel-owned chains.
@@ -241,7 +241,7 @@ def apply_guard(mode, selected, interface, subnets=''):
         ipt('-D', 'FORWARD', *rule)
     actual = fwd_rules()
     if not actual or actual[0][-1] != target:
-        raise RuntimeError('Impossibile verificare il filtro mangle')
+        raise RuntimeError('Unable to verify the mangle filter')
 
 
 def active_routes(data):
@@ -266,15 +266,15 @@ def main():
         action = 'restore'
     elif len(sys.argv) == 1:
         raw = sys.stdin.buffer.read(8193)
-        if len(raw) > 8192: raise ValueError('Richiesta troppo grande')
+        if len(raw) > 8192: raise ValueError('Request too large')
         body = json.loads(raw.decode('utf-8'))
         if not isinstance(body, dict) or set(body) != EXPECTED:
-            raise ValueError('Schema JSON non valido')
+            raise ValueError('Invalid JSON schema')
         action = 'apply'
     else:
-        raise ValueError('Argomenti non consentiti')
+        raise ValueError('Arguments not allowed')
     if os.geteuid() != 0:
-        raise ValueError('Il modulo di routing deve essere eseguito con privilegi root')
+        raise ValueError('The routing module must run with root privileges')
     os.makedirs(BASE, mode=0o700, exist_ok=True)
     with open(LOCK, 'a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

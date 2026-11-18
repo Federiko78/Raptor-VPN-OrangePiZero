@@ -31,6 +31,16 @@ Si installa con `sh install_eventlog.sh` (lo fa anche `install_factory.sh` e `up
 `unknown` (stato non leggibile). Gli orari (`epoch`) sono secondi Unix in UTC; il pannello li mostra
 nel fuso del tuo computer.
 
+## Contatori dei riavvii (pannello)
+
+In cima al pannello e nella sezione **Eventi** il pannello mostra quante volte la scheda è stata riavviata **oggi, nella settimana, nel mese e nell'anno**,
+con il numero di mancanze di corrente (`unclean_shutdown`) in ciascun periodo.
+
+- I periodi sono di **calendario** (la settimana parte da lunedì) e usano il fuso orario del computer con cui guardi il pannello.
+- Conta gli eventi `boot`; il **primo avvio assoluto** (`previous: first_boot`) non è un riavvio.
+- I conteggi usano tutto il registro (non solo gli ultimi 200 eventi mostrati in elenco).
+- Un avvio con l'orologio indietro viene spostato all'orario vero appena arriva l'evento `clock_synced` dello stesso avvio, così finisce nel giorno giusto.
+
 ## Da sapere
 
 - **L'orologio.** Senza batteria la scheda parte con l'orologio indietro finché non si sincronizza

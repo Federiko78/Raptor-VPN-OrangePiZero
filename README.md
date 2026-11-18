@@ -18,7 +18,9 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - **Wi-Fi "Raptor VPN - <IP>"** per ~3 minuti dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
 - **Account Tailscale dal pannello**: accesso con link oppure con chiave di autenticazione + tag, scollegamento e riattivazione, senza SSH. Vedi [`ACCOUNT_TAILSCALE.md`](ACCOUNT_TAILSCALE.md).
 - **Grafica Raptor**: stesso stile nero e oro del pannello Raptor AI, con menu, tema scuro e versione per telefono.
-- **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello. Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
+- **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello (ultima scheda). Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
+- **Statistiche dei riavvii** in cima al pannello (oggi, settimana, mese, anno, con le mancanze di corrente) e contatori nella sezione Eventi.
+- **Due lingue**, inglese (predefinita) e italiano, scelte con il selettore EN | IT in alto: i testi stanno in `i18n/*.json`. Vedi [`LINGUE.md`](LINGUE.md).
 - **IP di recupero** `169.254.X.Y` scelto da te: raggiunge sempre il pannello dalla stessa LAN, anche con Tailscale spento o IP sconosciuto (la password resta obbligatoria). Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Sistema operativo richiesto
@@ -71,6 +73,7 @@ python3 test_tsauth.py       # accesso Tailscale (programma root)
 python3 test_panel_account.py # accesso Tailscale (lato pannello)
 python3 test_update.py       # update.sh (come root)
 python3 test_panel_events.py # registro eventi (lettura nel pannello)
+python3 test_panel_i18n.py   # lingue, contatori e JavaScript della pagina (serve node)
 sha256sum -c SHA256SUMS      # integrità del pacchetto (usata da install_factory.sh)
 ```
 

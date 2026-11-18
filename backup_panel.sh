@@ -11,6 +11,9 @@ cat > "$DIR/paths.txt" <<'EOF'
 opt/tailscale-panel/tailscale_panel.py
 opt/tailscale-panel/password_policy.py
 opt/tailscale-panel/panel_assets.py
+opt/tailscale-panel/panel_i18n.py
+opt/tailscale-panel/i18n/en.json
+opt/tailscale-panel/i18n/it.json
 usr/local/libexec/tailscale-panel-helper
 usr/local/libexec/tailscale-panel-net-helper
 usr/local/libexec/tailscale-panel-discovery

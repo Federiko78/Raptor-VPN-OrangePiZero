@@ -15,8 +15,8 @@ import sys
 MIN_LENGTH = 12
 MAX_LENGTH = 128
 
-POLICY_DESCRIPTION = ('Da %d a %d caratteri, con almeno una lettera maiuscola, '
-                      'una minuscola e un numero. I simboli sono facoltativi.' % (MIN_LENGTH, MAX_LENGTH))
+POLICY_DESCRIPTION = ('From %d to %d characters, with at least one uppercase letter, '
+                      'one lowercase letter and one number. Symbols are optional.' % (MIN_LENGTH, MAX_LENGTH))
 
 
 def password_error(password):
@@ -26,37 +26,37 @@ def password_error(password):
     shorter password keeps working until it is changed.
     """
     if not isinstance(password, str) or len(password) < MIN_LENGTH or len(password) > MAX_LENGTH:
-        return 'La password deve contenere da %d a %d caratteri.' % (MIN_LENGTH, MAX_LENGTH)
+        return 'The password must contain from %d to %d characters.' % (MIN_LENGTH, MAX_LENGTH)
     if len(password.encode('utf-8')) > 256:
-        return 'La password supera il limite di 256 byte UTF-8.'
+        return 'The password exceeds the 256-byte UTF-8 limit.'
     if password != password.strip() or any(ord(c) < 32 or ord(c) == 127 for c in password):
-        return 'La password non può iniziare o finire con spazi né contenere caratteri di controllo.'
+        return 'The password cannot start or end with spaces or contain control characters.'
     if not re.search('[A-Z]', password):
-        return 'La password deve contenere almeno una lettera maiuscola (A-Z).'
+        return 'The password must contain at least one uppercase letter (A-Z).'
     if not re.search('[a-z]', password):
-        return 'La password deve contenere almeno una lettera minuscola (a-z).'
+        return 'The password must contain at least one lowercase letter (a-z).'
     if not re.search('[0-9]', password):
-        return 'La password deve contenere almeno un numero (0-9).'
+        return 'The password must contain at least one number (0-9).'
     return None
 
 
 def change_linux_root_password():
     """Interactively change root via chpasswd stdin, never command-line args."""
     if os.geteuid() != 0 or not os.isatty(0):
-        sys.exit('ERRORE: cambiare root soltanto da una sessione SSH interattiva come root.')
+        sys.exit('ERROR: change the root password only from an interactive SSH session as root.')
     executable = shutil.which('chpasswd')
     if not executable:
-        sys.exit('ERRORE: chpasswd non disponibile; password Linux non modificata.')
-    print('Regole password Linux: ' + POLICY_DESCRIPTION)
-    print('La password non verrà mostrata e non sarà condivisa con la Web UI.')
+        sys.exit('ERROR: chpasswd not available; Linux password unchanged.')
+    print('Linux password rules: ' + POLICY_DESCRIPTION)
+    print('The password will not be displayed and is not shared with the Web UI.')
     for _ in range(3):
         try:
-            first = getpass.getpass('Nuova password Linux root: ')
-            second = getpass.getpass('Conferma password Linux root: ')
+            first = getpass.getpass('New Linux root password: ')
+            second = getpass.getpass('Confirm Linux root password: ')
         except (EOFError, KeyboardInterrupt):
-            sys.exit('\nAnnullato: password Linux non modificata.')
+            sys.exit('\nCancelled: Linux password unchanged.')
         if first != second:
-            print('Le password non corrispondono. Riprova.')
+            print('The passwords do not match. Try again.')
             continue
         error = password_error(first)
         if error:
@@ -67,12 +67,12 @@ def change_linux_root_password():
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     timeout=20, check=False)
         except (OSError, subprocess.TimeoutExpired):
-            sys.exit('ERRORE: impossibile applicare la password Linux. Verificare il sistema.')
+            sys.exit('ERROR: unable to apply the Linux password. Check the system.')
         if result.returncode != 0:
-            sys.exit('ERRORE: chpasswd ha rifiutato il cambio della password Linux. Verificare PAM.')
+            sys.exit('ERROR: chpasswd refused the Linux password change. Check PAM.')
         print('Password Linux root aggiornata correttamente.')
         return
-    sys.exit('Troppi tentativi: password Linux non modificata.')
+    sys.exit('Too many attempts: Linux password unchanged.')
 
 
 if __name__ == '__main__':

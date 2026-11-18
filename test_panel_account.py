@@ -97,7 +97,7 @@ class AuthCallTests(unittest.TestCase):
     def test_timeout_and_missing_sudo(self):
         out, _ = self.call(side_effect=subprocess.TimeoutExpired('sudo', 85))
         self.assertFalse(out['ok'])
-        self.assertIn('in tempo', out['error'])
+        self.assertIn('did not answer in time', out['error'])
         out, _ = self.call(side_effect=OSError('sudo non trovato'))
         self.assertFalse(out['ok'])
 
@@ -124,10 +124,14 @@ class PageTests(unittest.TestCase):
         self.assertIn('autocomplete="off"', tag)
 
     def test_login_page_message_is_escaped_text_only(self):
-        self.assertIn('<div class="authmsg" role="alert">Password non valida.</div>', p.login_page('Password non valida.'))
+        self.assertIn('<div class="authmsg" role="alert">Invalid password.</div>', p.login_page('login.bad_password'))
+        self.assertIn('<div class="authmsg" role="alert">Password non valida.</div>', p.login_page('login.bad_password', 'it'))
         self.assertNotIn('<div class="authmsg"', p.login_page())
         self.assertNotIn('__MSG__', p.login_page())
         self.assertNotIn('__MSG__', p.login_page('x'))
+        # anche un messaggio sconosciuto non puo' portare markup nella pagina
+        self.assertIn('&lt;b&gt;x&lt;/b&gt;', p.login_page('<b>x</b>'))
+        self.assertNotIn('<b>x</b>', p.login_page('<b>x</b>'))
 
 
 if __name__ == '__main__':

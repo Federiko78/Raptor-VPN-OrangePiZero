@@ -121,6 +121,51 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('id="events"', html)
 
+    # ---------------------------------------------------------------- lingue
+    def test_default_language_is_english_and_the_cookie_switches_to_italian(self):
+        _, _, body = self.request('GET', '/login')
+        self.assertIn('<html lang="en">', body)
+        self.assertIn('LOG IN', body)
+        self.assertNotIn('ACCEDI', body)
+        _, _, body = self.request('GET', '/login', headers={'Cookie': 'lang=it'})
+        self.assertIn('<html lang="it">', body)
+        self.assertIn('ACCEDI', body)
+
+    def test_lang_route_sets_a_safe_cookie_and_goes_back_to_the_panel(self):
+        status, cookie, _ = self.request('GET', '/lang?set=it')
+        self.assertEqual(status, 303)
+        self.assertTrue(cookie.startswith('lang=it;'))
+        for flag in ('Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax'):
+            self.assertIn(flag, cookie)
+        for bad in ('/lang', '/lang?set=xx', '/lang?set=%3Cscript%3E', '/lang?set=it%0d%0aSet-Cookie:x=1'):
+            status, cookie, _ = self.request('GET', bad)
+            self.assertEqual(status, 303)
+            self.assertTrue(cookie.startswith('lang=en;'), bad)
+            self.assertNotIn('\n', cookie)
+
+    def test_unknown_language_cookie_falls_back_to_english(self):
+        _, _, body = self.request('GET', '/login', headers={'Cookie': 'lang=xx"><script>alert(1)</script>'})
+        self.assertIn('<html lang="en">', body)
+        self.assertNotIn('<script>alert(1)', body)
+
+    def test_login_error_follows_the_language(self):
+        form = {'Content-Type': 'application/x-www-form-urlencoded'}
+        _, _, body = self.request('POST', '/login', body='password=sbagliata-sbagliata', headers=dict(form, Cookie='lang=it'))
+        self.assertIn('<div class="authmsg" role="alert">Password non valida.</div>', body)
+        _, _, body = self.request('POST', '/login', body='password=sbagliata-sbagliata', headers=form)
+        self.assertIn('<div class="authmsg" role="alert">Invalid password.</div>', body)
+
+    def test_dashboard_follows_the_language_and_leaves_no_placeholder(self):
+        token, csrf = self.session()
+        for cookie, nav, tag in ((token, 'Events', '<html lang="en">'), (token + '; lang=it', 'Eventi', '<html lang="it">')):
+            status, _, html = self.request('GET', '/', headers={'Cookie': cookie})
+            self.assertEqual(status, 200)
+            self.assertIn(tag, html)
+            self.assertIn('href="#events">%s</a>' % nav, html)
+            self.assertNotRegex(html, r'\[\[[a-z._]+\]\]|\{\{[a-z._]+\}\}|__[A-Z0-9]+__')
+            self.assertIn("const csrf = '%s'" % csrf, html)
+            self.assertIn('href="/lang?set=it"', html)
+
     # ---------------------------------------------------------------- accesso Tailscale dal pannello
     TS_PATHS = ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect')
 
@@ -191,7 +236,7 @@ class ServerTests(unittest.TestCase):
     def test_login_errors_are_shown_inside_the_card_and_csp_allows_only_data_images(self):
         status, _, body = self.login('sbagliata-sbagliata')
         self.assertEqual(status, 401)
-        self.assertRegex(body, re.compile(r'<section class="auth">.*<div class="authmsg" role="alert">Password non valida\.</div>.*</section>', re.S))
+        self.assertRegex(body, re.compile(r'<section class="auth">.*<div class="authmsg" role="alert">Invalid password\.</div>.*</section>', re.S))
         conn = http.client.HTTPSConnection('127.0.0.1', self.port, timeout=8, context=unverified_context())
         try:
             conn.request('GET', '/login')

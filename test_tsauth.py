@@ -137,7 +137,7 @@ class LoginUrlTests(Base):
         self.configure(status={'BackendState': 'Running'})
         code, result = self.main({'action': 'login_url'})
         self.assertEqual(code, 1)
-        self.assertIn('già collegata', result['error'])
+        self.assertIn('already connected', result['error'])
         self.assertEqual(self.login_calls(), [])
 
     def test_becoming_connected_during_login(self):
@@ -273,7 +273,7 @@ class MainTests(Base):
             fcntl.flock(held, fcntl.LOCK_SH)          # basta un lock condiviso: quello esclusivo deve comunque essere rifiutato
             code, result = self.main({'action': 'logout'})
         self.assertEqual(code, 1)
-        self.assertIn('in corso', result['error'])
+        self.assertIn('already in progress', result['error'])
         self.assertEqual(self.calls(), [])
         self.assertEqual(stat.S_IMODE(os.stat(self.base / 'lock').st_mode), 0o600)
 

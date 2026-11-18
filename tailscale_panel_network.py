@@ -72,7 +72,7 @@ def ipv4(value):
     try:
         return ipaddress.IPv4Address(value)
     except (ipaddress.AddressValueError, TypeError):
-        raise ValueError('Indirizzo IPv4 non valido: %s' % value)
+        raise ValueError('Invalid IPv4 address: %s' % value)
 
 
 def private_lan(ip):
@@ -81,34 +81,34 @@ def private_lan(ip):
 
 def validate(body):
     if not isinstance(body, dict) or set(body) != {'mode','ip','prefix','gateway','dns'}:
-        raise ValueError('Campi di configurazione rete non validi.')
+        raise ValueError('Invalid network configuration fields.')
     mode = body['mode']
     if mode not in ('dhcp','static'):
-        raise ValueError('Modalita non valida: usare DHCP o statico.')
+        raise ValueError('Invalid mode: use DHCP or static.')
     if mode == 'dhcp':
         return {'mode':'dhcp','ip':'','prefix':24,'gateway':'','dns':[]}
     try:
         prefix = int(body['prefix'])
     except (TypeError, ValueError):
-        raise ValueError('Prefisso CIDR non valido.')
+        raise ValueError('Invalid CIDR prefix.')
     if not 8 <= prefix <= 30:
-        raise ValueError('Prefisso IPv4 consentito: da /8 a /30.')
+        raise ValueError('Allowed IPv4 prefix: /8 to /30.')
     address = ipv4(body['ip'])
     gateway = ipv4(body['gateway'])
     network = ipaddress.IPv4Network('%s/%s' % (address,prefix), strict=False)
     if not private_lan(address) or not private_lan(gateway):
-        raise ValueError('Sono consentiti solo IP e gateway delle reti LAN private.')
+        raise ValueError('Only IPs and gateways of private LAN networks are allowed.')
     if address in (network.network_address, network.broadcast_address):
-        raise ValueError('IP statico non utilizzabile: rete o broadcast.')
+        raise ValueError('Static IP not usable: network or broadcast address.')
     if gateway not in network or gateway == address:
-        raise ValueError('Il gateway deve stare nella stessa subnet ed essere diverso dall’IP Orange Pi.')
+        raise ValueError('The gateway must be in the same subnet and different from the Orange Pi IP.')
     if not isinstance(body['dns'], list) or not 1 <= len(body['dns']) <= 3:
-        raise ValueError('Inserire da 1 a 3 server DNS IPv4.')
+        raise ValueError('Enter 1 to 3 IPv4 DNS servers.')
     dns = []
     for item in body['dns']:
         addr = ipv4(item)
         if addr.is_multicast or addr.is_unspecified or addr.is_loopback or addr.is_link_local:
-            raise ValueError('Server DNS non utilizzabile.')
+            raise ValueError('DNS server not usable.')
         if str(addr) not in dns:
             dns.append(str(addr))
     return {'mode':'static','ip':str(address),'prefix':prefix,'gateway':str(gateway),'dns':dns}
@@ -119,10 +119,10 @@ def valid_recovery(value):
     try:
         ip = ipaddress.IPv4Address(str(value).strip())
     except ValueError:
-        raise ValueError('Indirizzo di recupero non valido: usare il formato 169.254.X.Y.')
+        raise ValueError('Invalid recovery address: use the format 169.254.X.Y.')
     packed = ip.packed
     if packed[0] != 169 or packed[1] != 254 or packed[2] in (0, 255) or packed[3] in (0, 255):
-        raise ValueError('L’indirizzo di recupero deve essere 169.254.X.Y con X e Y da 1 a 254.')
+        raise ValueError('The recovery address must be 169.254.X.Y with X and Y from 1 to 254.')
     return str(ip)
 
 
@@ -146,23 +146,23 @@ def known_default(content):
 
 def assert_platform():
     if not shutil.which('netplan'):
-        raise RuntimeError('Netplan non installato: gestione rete non supportata.')
+        raise RuntimeError('Netplan not installed: network management not supported.')
     if shell(['systemctl','is-active','systemd-networkd'], 8).stdout.strip() != 'active':
-        raise RuntimeError('Questo pannello richiede Armbian Minimal con systemd-networkd attivo.')
+        raise RuntimeError('This panel requires Armbian Minimal with systemd-networkd active.')
     if not pathlib.Path('/sys/class/net/' + DEV).exists():
-        raise RuntimeError('Interfaccia Ethernet end0 non presente.')
+        raise RuntimeError('Ethernet interface end0 not present.')
     if not NETDIR.exists():
-        raise RuntimeError('Cartella /etc/netplan mancante.')
+        raise RuntimeError('Folder /etc/netplan missing.')
     if not DEFAULT.exists() and not CUSTOM.exists():
-        raise RuntimeError('Configurazione Netplan preesistente non riconosciuta: verifica /etc/netplan.')
+        raise RuntimeError('Existing Netplan configuration not recognised: check /etc/netplan.')
     if DEFAULT.exists() and not known_default(DEFAULT.read_bytes()):
-        raise RuntimeError('Netplan personalizzato: intervenire manualmente, modifica automatica bloccata.')
+        raise RuntimeError('Custom Netplan: intervene manually, automatic change blocked.')
     # Refuse unknown netplan files: an unrelated eth profile could override end0.
     other = [f.name for f in NETDIR.iterdir() if f.suffix in ('.yaml','.yml') and f not in (DEFAULT,CUSTOM)]
     if other:
-        raise RuntimeError('Profili Netplan aggiuntivi (%s): modifica automatica bloccata per sicurezza.' % ', '.join(other)[:160])
+        raise RuntimeError('Additional Netplan profiles (%s): automatic change blocked for safety.' % ', '.join(other)[:160])
     if CUSTOM.exists() and 'Managed by Tailscale Panel' not in CUSTOM.read_text():
-        raise RuntimeError('File Netplan del pannello modificato esternamente: rifiuto la sovrascrittura.')
+        raise RuntimeError('Panel Netplan file modified externally: refusing to overwrite.')
 
 
 def get_current():
@@ -234,7 +234,7 @@ def snapshot():
 def restore(files):
     for path, content in files.items():
         if path not in (str(DEFAULT),str(CUSTOM)):
-            raise RuntimeError('Percorso backup non consentito.')
+            raise RuntimeError('Backup path not allowed.')
         file = pathlib.Path(path)
         if content is None:
             if file.exists():
@@ -252,14 +252,14 @@ def rollback(id):
     def run_rollback():
         pending = read_pending()
         if not pending or pending['id'] != id:
-            return {'ok':True,'note':'Nessuna modifica da ripristinare.'}
+            return {'ok':True,'note':'No change to restore.'}
         restore(pending['snapshot'])
         generate = shell(['netplan','generate'], 20)
         if generate.returncode:
-            raise RuntimeError('Ripristino configurazione su disco, ma netplan generate non riuscito: '+generate.stderr[-200:])
+            raise RuntimeError('Configuration restored on disk, but netplan generate failed: '+generate.stderr[-200:])
         applied = shell(['netplan','apply'],75)
         if applied.returncode:
-            raise RuntimeError('Ripristino su disco riuscito ma applicazione fallita: '+applied.stderr[-200:])
+            raise RuntimeError('Restore on disk succeeded but applying failed: '+applied.stderr[-200:])
         PENDING.unlink(missing_ok=True)
         return {'ok':True,'rolled_back':True}
     return locked(run_rollback)
@@ -269,10 +269,10 @@ def start(config):
     def perform():
         assert_platform()
         if read_pending():
-            raise RuntimeError('Modifica precedente ancora in sospeso. Confermala o attendi il ripristino.')
+            raise RuntimeError('Previous change still pending. Confirm it or wait for the restore.')
         space = shutil.disk_usage('/').free
         if space < 30 * 1024 * 1024:
-            raise RuntimeError('Spazio libero insufficiente per una modifica di rete sicura.')
+            raise RuntimeError('Not enough free space for a safe network change.')
         sid = uuid.uuid4().hex[:14]
         pending = {'id':sid,'config':config,'snapshot':snapshot(),
                    'expires_at':int(time.time())+WAIT_SECONDS,'state':'scheduled'}
@@ -281,7 +281,7 @@ def start(config):
                                 '--on-active=%ds' % WAIT_SECONDS,
                                 str(SELF),'--rollback',sid],20)
         if rollback_timer.returncode:
-            raise RuntimeError('Impossibile creare timer ripristino: '+rollback_timer.stderr[-200:])
+            raise RuntimeError('Unable to create the restore timer: '+rollback_timer.stderr[-200:])
         # Durable, root-only copy of the original Netplan files for manual recovery.
         atomic_write(STATE / ('backup-'+sid+'.json'),json.dumps(pending['snapshot']).encode())
         atomic_write(PENDING, json.dumps(pending).encode())
@@ -290,7 +290,7 @@ def start(config):
         if apply_timer.returncode:
             PENDING.unlink(missing_ok=True)
             cancel_timers(sid)
-            raise RuntimeError('Impossibile avviare modifica rete: '+apply_timer.stderr[-200:])
+            raise RuntimeError('Unable to start the network change: '+apply_timer.stderr[-200:])
         return {'ok':True,'id':sid,'expires_at':pending['expires_at'],
                 'new_url':'https://'+ (config['ip'] if config['mode']=='static' else 'orangepizero.local')+':8443',
                 'host_url':'https://orangepizero.local:8443'}
@@ -301,7 +301,7 @@ def apply(id):
     def run_apply():
         pending = read_pending()
         if not pending or pending['id'] != id:
-            return {'ok':True,'note':'Modifica gia conclusa.'}
+            return {'ok':True,'note':'Change already completed.'}
         config = pending['config']
         if DEFAULT.exists():
             DEFAULT.unlink()
@@ -311,7 +311,7 @@ def apply(id):
             restore(pending['snapshot'])
             shell(['netplan','generate'],20)
             PENDING.unlink(missing_ok=True)
-            raise RuntimeError('Netplan generate fallito: '+generate.stderr[-300:])
+            raise RuntimeError('Netplan generate failed: '+generate.stderr[-300:])
         pending['state'] = 'applying'
         atomic_write(PENDING,json.dumps(pending).encode())
         return {'ok':True}
@@ -333,17 +333,17 @@ def confirm(id):
     def run_confirm():
         p = read_pending()
         if not p or p['id'] != id:
-            raise ValueError('Nessuna configurazione in attesa con questo identificativo.')
+            raise ValueError('No pending configuration with this identifier.')
         if p.get('state') != 'applied':
-            raise ValueError('Modifica non ancora applicata: attendere e riprovare.')
+            raise ValueError('Change not applied yet: wait and try again.')
         current = shell(['ip','-j','-4','addr','show','dev',DEV],10)
         ips = json.loads(current.stdout) if current.returncode==0 else []
         assigned = {a.get('local') for d in ips for a in d.get('addr_info',[])}
         desired = p['config']['ip']
         if desired and desired not in assigned:
-            raise ValueError('L’IP statico non e ancora attivo: non confermo.')
+            raise ValueError('The static IP is not active yet: not confirming.')
         if not assigned:
-            raise ValueError('Nessun IP assegnato su end0: non confermo.')
+            raise ValueError('No IP assigned on end0: not confirming.')
         PENDING.unlink(missing_ok=True)
         return {'ok':True,'confirmed':True}
     result = locked(run_confirm)
@@ -359,12 +359,12 @@ def set_recovery(value):
     e le sessioni SSH aperte non vengono toccati.
     """
     if os.geteuid() != 0:
-        raise RuntimeError('Operazione riservata a root.')
+        raise RuntimeError('Operation reserved to root.')
 
     def perform():
         assert_platform()
         if read_pending():
-            raise RuntimeError('Modifica di rete in sospeso: confermarla o attendere il ripristino.')
+            raise RuntimeError('Network change pending: confirm it or wait for the restore.')
         old = recovery_ip()
         if value == 'none':
             new = None
@@ -393,7 +393,7 @@ def set_recovery(value):
                 else:
                     atomic_write(RECOVERY_CONF, previous_conf, 0o600)
                 shell(['netplan', 'generate'], 20)
-                raise RuntimeError('Netplan generate fallito: ' + generate.stderr[-300:])
+                raise RuntimeError('Netplan generate failed: ' + generate.stderr[-300:])
         if old and old != new:
             shell(['ip', 'addr', 'del', '%s/%d' % (old, RECOVERY_PREFIX), 'dev', DEV], 10)
         if new:
@@ -401,7 +401,7 @@ def set_recovery(value):
             # l'IP di recupero non finisce negli annunci mDNS ne' in orangepizero.local.
             added = shell(['ip', 'addr', 'replace', '%s/%d' % (new, RECOVERY_PREFIX), 'dev', DEV, 'scope', 'link'], 10)
             if added.returncode:
-                raise RuntimeError('Indirizzo salvato ma non attivato subito: ' + added.stderr[-200:])
+                raise RuntimeError('Address saved but not activated immediately: ' + added.stderr[-200:])
         return {'ok': True, 'recovery_ip': new, 'persistent': True}
     return locked(perform)
 
@@ -409,10 +409,10 @@ def set_recovery(value):
 def api():
     data = sys.stdin.buffer.read(8193)
     if len(data)>8192:
-        raise ValueError('Richiesta troppo grande')
+        raise ValueError('Request too large')
     payload = json.loads(data)
     if not isinstance(payload,dict):
-        raise ValueError('Richiesta non valida')
+        raise ValueError('Invalid request')
     action=payload.get('action')
     if action=='status' and set(payload)=={'action'}:
         return {'ok':True,'network':get_current()}
@@ -421,9 +421,9 @@ def api():
     if action=='confirm' and set(payload)=={'action','id'}:
         id=payload['id']
         if not isinstance(id,str) or not re.fullmatch('[0-9a-f]{14}',id):
-            raise ValueError('ID conferma non valido')
+            raise ValueError('Invalid confirmation ID')
         return confirm(id)
-    raise ValueError('Azione o parametri non consentiti.')
+    raise ValueError('Action or parameters not allowed.')
 
 
 def main():
@@ -432,18 +432,18 @@ def main():
     os.chmod(STATE,0o700)
     if len(sys.argv)==2 and sys.argv[1]=='--recover':
         pending=read_pending()
-        result=rollback(pending['id']) if pending else {'ok':True,'note':'Nessun ripristino necessario.'}
+        result=rollback(pending['id']) if pending else {'ok':True,'note':'No restore needed.'}
     elif len(sys.argv)==3 and sys.argv[1]=='--set-recovery':
         result=set_recovery(sys.argv[2])
     elif len(sys.argv)==3 and sys.argv[1] in ('--apply','--rollback'):
         sid=sys.argv[2]
         if not re.fullmatch('[0-9a-f]{14}',sid):
-            raise ValueError('ID interno non valido')
+            raise ValueError('Invalid internal ID')
         result = apply(sid) if sys.argv[1]=='--apply' else rollback(sid)
     elif len(sys.argv)==1:
         result=api()
     else:
-        raise ValueError('Argomenti non consentiti.')
+        raise ValueError('Arguments not allowed.')
     print(json.dumps(result))
 
 if __name__=='__main__':

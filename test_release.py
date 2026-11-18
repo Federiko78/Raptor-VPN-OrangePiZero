@@ -124,14 +124,47 @@ class DiscoveryTests(unittest.TestCase):
 
 class AppTests(unittest.TestCase):
     def test_version_and_routes_visible(self):
-        self.assertIn('Web UI v1.6.0',p.DASH)
-        self.assertIn('LAN Device Discovery',p.DASH)
+        page=p.dashboard_page('0'*64,'en')
+        self.assertIn('Web UI v1.6.0',page)
+        self.assertIn('LAN Device Discovery',page)
         self.assertIn("'/api/scan'",DIR.joinpath('tailscale_panel.py').read_text())
-        self.assertIn("routeSelected",p.DASH)
+        self.assertIn("routeSelected",page)
     def test_password_behavior_retained(self):
         from sys import path
         self.assertIsNone(p.password_error('Abcdefghij12'))
         self.assertIsNotNone(p.password_error('abcdefghij12'))   # manca la maiuscola
         self.assertIsNotNone(p.password_error('Abcdefg1'))       # troppo corta (minimo 12)
+
+class PackageTests(unittest.TestCase):
+    """update.sh e install_factory.sh rifiutano un pacchetto con SHA256SUMS non aggiornato: lo controlliamo qui."""
+    def listed(self):
+        out={}
+        for line in DIR.joinpath('SHA256SUMS').read_text().splitlines():
+            digest,name=line.split('  ',1)
+            out[name]=digest
+        return out
+
+    def test_sha256sums_match_every_listed_file(self):
+        import hashlib
+        for name,digest in self.listed().items():
+            self.assertEqual(hashlib.sha256(DIR.joinpath(name).read_bytes()).hexdigest(),digest,name+': rigenerare SHA256SUMS')
+
+    def test_sha256sums_cover_the_program_files(self):
+        listed=self.listed()
+        for path in sorted(DIR.glob('*.py'))+sorted(DIR.glob('*.sh'))+sorted(DIR.glob('i18n/*.json')):
+            self.assertIn(path.relative_to(DIR).as_posix(),listed,'manca in SHA256SUMS')
+
+    def test_language_files_are_installed_backed_up_and_checked(self):
+        panel=DIR.joinpath('install_tailscale_panel.sh').read_text()
+        self.assertIn('panel_i18n.py',panel)
+        self.assertIn('"$DIR"/i18n/*.json',panel)
+        self.assertIn('i18n/en.json',panel)                    # senza la lingua predefinita non si installa
+        factory=DIR.joinpath('install_factory.sh').read_text()
+        for name in ('panel_i18n.py','i18n/en.json','i18n/it.json'):
+            self.assertIn(name,factory)
+        backup=DIR.joinpath('backup_panel.sh').read_text()
+        for name in ('opt/tailscale-panel/panel_i18n.py','opt/tailscale-panel/i18n/en.json','opt/tailscale-panel/i18n/it.json'):
+            self.assertIn(name,backup)
+        self.assertIn('Lingue del pannello',DIR.joinpath('check_installation.sh').read_text())
 
 if __name__=='__main__': unittest.main(verbosity=2)

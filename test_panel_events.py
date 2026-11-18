@@ -111,6 +111,52 @@ class ReadTests(Base):
         self.assertIsInstance(summary['uptime_seconds'], int)
         self.assertEqual(summary['now'], NOW)
 
+    def test_restart_and_power_loss_lists_for_the_counters(self):
+        day = 86400
+        self.write({'type': 'boot', 'epoch': NOW - 90 * day, 'previous': 'first_boot'},
+                   {'type': 'boot', 'epoch': NOW - 20 * day, 'previous': 'clean_reboot'},
+                   {'type': 'unclean_shutdown', 'epoch': NOW - 3 * day},
+                   {'type': 'boot', 'epoch': NOW - 3 * day, 'previous': 'unclean'},
+                   {'type': 'shutdown', 'epoch': NOW - day, 'kind': 'reboot'},
+                   {'type': 'boot', 'epoch': NOW - day + 40, 'previous': 'clean_reboot'})
+        summary = self.read()['summary']
+        # il primo avvio assoluto non e' un riavvio; gli spegnimenti regolari non contano come avvii
+        self.assertEqual(summary['restart_epochs'], [NOW - 20 * day, NOW - 3 * day, NOW - day + 40])
+        self.assertEqual(summary['unclean_epochs'], [NOW - 3 * day])
+
+    def test_lists_cover_the_whole_history_not_only_the_returned_events(self):
+        self.write(*[{'type': 'boot', 'epoch': NOW - 10000 + i, 'previous': 'clean_reboot'} for i in range(250)])
+        data = self.read()
+        self.assertEqual(len(data['events']), p.EVENTS_LIMIT)
+        self.assertEqual(len(data['summary']['restart_epochs']), 250)
+
+    def test_clock_correction_moves_the_boot_and_the_power_loss_of_the_same_boot(self):
+        bid, other = 'aaaaaaaa-1111', 'bbbbbbbb-2222'
+        self.write({'type': 'boot', 'epoch': 1_700_000_100, 'boot_id': other, 'previous': 'clean_reboot'},
+                   {'type': 'boot', 'epoch': 1_000_000_100, 'boot_id': bid, 'previous': 'unclean', 'clock_synced': False},
+                   {'type': 'unclean_shutdown', 'epoch': 1_000_000_100, 'boot_id': bid, 'detected_epoch': 1_000_000_100},
+                   {'type': 'clock_synced', 'epoch': 1_790_000_000, 'boot_id': bid, 'jump_seconds': 789_999_000})
+        data = self.read()
+        by_type = {e['type']: e for e in data['events']}
+        corrected = [e for e in data['events'] if e['type'] == 'boot' and e.get('previous') == 'unclean'][0]
+        self.assertEqual(corrected['epoch'], 1_000_000_100 + 789_999_000)
+        self.assertEqual(by_type['unclean_shutdown']['epoch'], 1_000_000_100 + 789_999_000)
+        self.assertEqual(by_type['clock_synced']['epoch'], 1_790_000_000)           # l'evento di sincronizzazione non si sposta
+        self.assertIn(1_000_000_100 + 789_999_000, data['summary']['restart_epochs'])
+        self.assertIn(1_700_000_100, data['summary']['restart_epochs'])             # un altro avvio resta com'e'
+        self.assertEqual(data['summary']['unclean_epochs'], [1_000_000_100 + 789_999_000])
+
+    def test_clock_correction_ignores_an_unusable_boot_id(self):
+        self.write({'type': 'boot', 'epoch': NOW - 500, 'boot_id': '../../x', 'previous': 'clean_reboot'},
+                   {'type': 'clock_synced', 'epoch': NOW, 'boot_id': '../../x', 'jump_seconds': 100})
+        data = self.read()
+        self.assertEqual([e['epoch'] for e in data['events'] if e['type'] == 'boot'], [NOW - 500])
+
+    def test_internal_fields_never_reach_the_page(self):
+        self.write({'type': 'boot', 'epoch': NOW - 5, 'boot_id': 'cccccccc-3333', 'previous': 'clean_reboot'})
+        for e in self.read()['events']:
+            self.assertFalse([k for k in e if k.startswith('_') or k == 'boot_id'])
+
     def test_empty_file(self):
         self.write()
         data = self.read()

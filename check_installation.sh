@@ -61,6 +61,11 @@ if [ -x /usr/local/libexec/tailscale-panel-auth ] && [ -s /opt/tailscale-panel/p
 else
   line 'Accesso Tailscale dal pannello' 'ERRORE: programma o regola sudoers mancanti (rilanciare install_tailscale_panel.sh)'; ok=0
 fi
+if langs=$(python3 -c 'import sys; sys.path.insert(0, "/opt/tailscale-panel"); import panel_i18n as m; c = m.Catalog("/opt/tailscale-panel/i18n"); assert not c.problems and "en" in c.codes() and len(c.langs["en"]["ui"]) > 100; print(" ".join(c.codes()))' 2>/dev/null); then
+  line 'Lingue del pannello' "OK ($langs; la prima e' la predefinita)"
+else
+  line 'Lingue del pannello' 'ERRORE: file lingua mancanti o non validi (rilanciare install_tailscale_panel.sh)'; ok=0
+fi
 if [ -f /etc/tailscale-panel-lan.conf ] && [ ! -L /etc/tailscale-panel-lan.conf ] && \
    [ "$(stat -c '%U:%G' /etc/tailscale-panel-lan.conf 2>/dev/null)" = root:root ] && \
    grep -Fq "INTERFACE_FILE = '/etc/tailscale-panel-lan.conf'" /usr/local/libexec/tailscale-panel-discovery 2>/dev/null && \
