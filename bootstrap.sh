@@ -10,7 +10,7 @@
 # Si puo' rilanciare: se la cartella esiste la aggiorna.
 #
 # Variabili facoltative:  RAPTOR_BRANCH (predefinito: main)   RAPTOR_DIR   RAPTOR_REPO
-#   curl -fsSL <url>/bootstrap.sh | RAPTOR_BRANCH=sicurezza sh
+#   curl -fsSL <url>/bootstrap.sh | RAPTOR_BRANCH=altro-ramo sh      (per provare un ramo di lavoro)
 #
 # Tutto e' dentro main(): la shell legge lo script da una pipe e, senza questa precauzione,
 # dopo il cambio di input continuerebbe a leggere i comandi dalla tastiera.
