@@ -243,6 +243,9 @@ const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
  if(cfg.submit){for(const [id,v] of Object.entries(cfg.submit.fields)){E(id).value=v;}
   if(cfg.submit.key)E('accModeKey').checked=true;
   await E('accForm').handlers.submit({preventDefault(){}});await new Promise(r=>setTimeout(r,40));out.sent=bodies['/api/tailscale/login'];out.accMsg=txt('accMsg');}
+ if(cfg.clicks){out.hidden=[];for(const id of cfg.clicks){await E(id).handlers.click();await new Promise(r=>setTimeout(r,40));
+   out.hidden.push(Object.fromEntries(['accOff','accOffBox','accLogout','accLogoutBox'].map(k=>[k,E(k).hidden])));}
+  out.posted=Object.keys(bodies);out.calls=calls;out.accNote=txt('accNote');}
  if(cfg.messages)out.translated=cfg.messages.map(m=>vm.runInContext('S('+JSON.stringify(m)+')',ctx));
  out.pending=await Promise.resolve(0);
  console.log(JSON.stringify(out));
@@ -287,8 +290,8 @@ def status_body(**extra):
 
 @unittest.skipUnless(NODE, 'node not installed')
 class JavaScriptRuntimeTests(unittest.TestCase):
-    def run_page(self, lang='en', status=None, events=None, typing=None, messages=None, submit=None, extra=None):
-        cfg = {'now': stamp('2026-11-18 12:00:00'), 'typing': typing, 'messages': messages, 'submit': submit,
+    def run_page(self, lang='en', status=None, events=None, typing=None, messages=None, submit=None, extra=None, clicks=None):
+        cfg = {'now': stamp('2026-11-18 12:00:00'), 'typing': typing, 'messages': messages, 'submit': submit, 'clicks': clicks,
                'responses': {'/api/status': {'body': status or status_body()}, '/api/events': {'body': events or events_body()}}}
         cfg['responses'].update(extra or {})
         with tempfile.TemporaryDirectory() as folder:
@@ -405,6 +408,30 @@ class JavaScriptRuntimeTests(unittest.TestCase):
         reply = {'/api/tailscale/login': {'ok': False, 'body': {'ok': False, 'error': 'Invalid key: it must start with tskey-auth- (or tskey-client-).'}}}
         out = self.run_page('it', submit={'fields': {'accName': 'x', 'accKey': 'tskey-auth-abcdef'}, 'key': True}, extra=reply)
         self.assertEqual(out['accMsg'], 'Chiave non valida: deve iniziare con tskey-auth- (o tskey-client-).')
+
+    def test_turn_off_asks_first_and_then_posts_to_the_down_route(self):
+        reply = {'/api/tailscale/down': {'body': {'ok': True}}}
+        out = self.run_page(clicks=['accOff'], extra=reply)
+        self.assertEqual(out['hidden'][0], {'accOff': True, 'accOffBox': False, 'accLogout': False, 'accLogoutBox': True})
+        self.assertEqual(out['posted'], [], 'solo aprire la conferma non spegne nulla')
+        out = self.run_page(clicks=['accOff', 'accOffNo'], extra=reply)
+        self.assertEqual(out['hidden'][1], {'accOff': False, 'accOffBox': True, 'accLogout': False, 'accLogoutBox': True})
+        self.assertEqual(out['posted'], [])
+        out = self.run_page(clicks=['accOff', 'accOffYes'], extra=reply)
+        self.assertEqual(out['posted'], ['/api/tailscale/down'])
+        self.assertEqual(out['hidden'][1]['accOffBox'], True)
+        self.assertEqual(out['calls'].count('/api/status'), 2, 'dopo lo spegnimento lo stato viene riletto')
+
+    def test_the_two_confirmations_exclude_each_other(self):
+        out = self.run_page(clicks=['accOff', 'accLogout'])
+        self.assertEqual(out['hidden'][1], {'accOff': False, 'accOffBox': True, 'accLogout': True, 'accLogoutBox': False})
+        out = self.run_page(clicks=['accLogout', 'accOff'])
+        self.assertEqual(out['hidden'][1], {'accOff': True, 'accOffBox': False, 'accLogout': False, 'accLogoutBox': True})
+
+    def test_turn_off_error_is_shown_translated(self):
+        reply = {'/api/tailscale/down': {'ok': False, 'body': {'ok': False, 'error': 'Unable to turn Tailscale off: permission denied'}}}
+        out = self.run_page('it', clicks=['accOff', 'accOffYes'], extra=reply)
+        self.assertEqual(out['accNote'], 'Impossibile spegnere Tailscale: permission denied')
 
     def test_the_key_field_is_left_untouched(self):
         self.assertNotIn("'accKey'", re.search(r"for\(const id of \['accName','accTagsIn'\]\)", dash_js()).group(0))

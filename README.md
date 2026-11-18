@@ -16,7 +16,7 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - DHCP o IP statico via Netplan, con **conferma entro 150 s** e rollback automatico.
 - Helper root con schema JSON fisso, nessuna shell; `sudo` limitato a tre comandi senza argomenti.
 - **Wi-Fi "Raptor VPN - <IP>"** per ~3 minuti dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
-- **Account Tailscale dal pannello**: accesso con link oppure con chiave di autenticazione + tag, scollegamento e riattivazione, senza SSH. Vedi [`ACCOUNT_TAILSCALE.md`](ACCOUNT_TAILSCALE.md).
+- **Account Tailscale dal pannello**: accesso con link oppure con chiave di autenticazione + tag, **spegnimento e riaccensione di Tailscale**, scollegamento dall'account, senza SSH. Vedi [`ACCOUNT_TAILSCALE.md`](ACCOUNT_TAILSCALE.md).
 - **Grafica Raptor**: stesso stile nero e oro del pannello Raptor AI, con menu, tema scuro e versione per telefono.
 - **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello (ultima scheda). Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
 - **Statistiche dei riavvii** in cima al pannello (oggi, settimana, mese, anno, con le mancanze di corrente) e contatori nella sezione Eventi.

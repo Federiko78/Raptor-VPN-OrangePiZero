@@ -167,7 +167,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn('href="/lang?set=it"', html)
 
     # ---------------------------------------------------------------- accesso Tailscale dal pannello
-    TS_PATHS = ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect')
+    TS_PATHS = ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect', '/api/tailscale/down')
 
     def post_json(self, path, payload, token, csrf, content_type='application/json'):
         headers = {'Cookie': token, 'Content-Type': content_type}
@@ -217,14 +217,14 @@ class ServerTests(unittest.TestCase):
                 status, _, _ = self.post_json('/api/tailscale/login', payload, token, csrf)
             self.assertEqual(status, 400, payload)
             auth.assert_not_called()
-        for path in ('/api/tailscale/logout', '/api/tailscale/connect'):
+        for path in ('/api/tailscale/logout', '/api/tailscale/connect', '/api/tailscale/down'):
             with patch.object(p, 'tailscale_auth') as auth:
                 self.assertEqual(self.post_json(path, {'tags': ['tag:a']}, token, csrf)[0], 400, path)
             auth.assert_not_called()
 
     def test_tailscale_logout_connect_and_failure(self):
         token, csrf = self.session()
-        for path, action in (('/api/tailscale/logout', 'logout'), ('/api/tailscale/connect', 'connect')):
+        for path, action in (('/api/tailscale/logout', 'logout'), ('/api/tailscale/connect', 'connect'), ('/api/tailscale/down', 'down')):
             with patch.object(p, 'tailscale_auth', return_value={'ok': True}) as auth:
                 self.assertEqual(self.post_json(path, {}, token, csrf)[0], 200)
             auth.assert_called_once_with({'action': action})

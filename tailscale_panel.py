@@ -369,7 +369,7 @@ def status_data():
 
 
 def tailscale_auth(request):
-    """Chiede al programma root di fare login/logout/connect. Risposta ripulita: mai testo non controllato."""
+    """Chiede al programma root di fare login/logout/connect/down. Risposta ripulita: mai testo non controllato."""
     try:
         proc = run(['/usr/bin/sudo', '-n', AUTH_HELPER], timeout=85, input_text=json.dumps(request))
     except subprocess.TimeoutExpired:
@@ -576,7 +576,9 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 <div id="accConnected" hidden>
 <p id="accConnectedText"></p>
 <p id="accTagsRow" hidden><strong>[[acc.tags_label]]</strong> <span class="value" id="accTags">-</span></p>
-<div class="buttonrow"><button class="danger" id="accLogout" type="button">[[acc.logout]]</button></div>
+<div class="buttonrow"><button class="quiet" id="accOff" type="button">[[acc.off]]</button><button class="danger" id="accLogout" type="button">[[acc.logout]]</button></div>
+<div id="accOffBox" class="notice warnnotice" hidden>[[acc.off_confirm]]
+<div class="buttonrow"><button class="danger" id="accOffYes" type="button">[[acc.off_yes]]</button><button class="quiet" id="accOffNo" type="button">[[acc.cancel]]</button></div></div>
 <div id="accLogoutBox" class="notice warnnotice" hidden>[[acc.logout_confirm]]
 <div class="buttonrow"><button class="danger" id="accLogoutYes" type="button">[[acc.logout_yes]]</button><button class="quiet" id="accLogoutNo" type="button">[[acc.cancel]]</button></div></div></div>
 <div id="accStopped" hidden><p>[[acc.stopped]]</p><div class="buttonrow"><button class="action" id="accConnect" type="button">[[acc.reactivate]]</button></div></div>
@@ -883,7 +885,15 @@ $('accCopy').addEventListener('click',async()=>{
  catch(e){$('accCopy').textContent=T('acc.copy_manual');}
  setTimeout(()=>{$('accCopy').textContent=T('acc.copy');},2500);
 });
-$('accLogout').addEventListener('click',()=>{$('accLogoutBox').hidden=false;$('accLogout').hidden=true;});
+$('accOff').addEventListener('click',()=>{$('accOffBox').hidden=false;$('accOff').hidden=true;$('accLogoutBox').hidden=true;$('accLogout').hidden=false;});
+$('accOffNo').addEventListener('click',()=>{$('accOffBox').hidden=true;$('accOff').hidden=false;});
+$('accOffYes').addEventListener('click',async()=>{
+ $('accOffYes').disabled=true;
+ try{await postJson('/api/tailscale/down',{});$('accOffBox').hidden=true;$('accOff').hidden=false;await refresh();}
+ catch(error){accNote(error.message,true);}
+ finally{$('accOffYes').disabled=false;}
+});
+$('accLogout').addEventListener('click',()=>{$('accLogoutBox').hidden=false;$('accLogout').hidden=true;$('accOffBox').hidden=true;$('accOff').hidden=false;});
 $('accLogoutNo').addEventListener('click',()=>{$('accLogoutBox').hidden=true;$('accLogout').hidden=false;});
 $('accLogoutYes').addEventListener('click',async()=>{
  $('accLogoutYes').disabled=true;
@@ -1238,7 +1248,7 @@ class Handler(BaseHTTPRequestHandler):
                 if proc.returncode or not result.get('ok'):
                     return self._json(400, {'error':str(result.get('error') or proc.stderr.strip() or 'Network error')[:500]})
                 return self._json(200,result)
-            if path in ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect'):
+            if path in ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect', '/api/tailscale/down'):
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
                     return self._json(415, {'error':'Unsupported Content-Type'})
                 if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):

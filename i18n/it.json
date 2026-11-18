@@ -42,7 +42,10 @@
   "acc.down": "<strong>Tailscale non risponde.</strong> Il servizio potrebbe essere fermo o in avvio: attendi qualche secondo e premi “Aggiorna stato”.",
   "acc.connected": "La scheda è collegata alla rete Tailscale <strong>{tailnet}</strong> con il nome <strong>{host}</strong>.",
   "acc.tags_label": "Tag:",
-  "acc.logout": "Scollega da Tailscale",
+  "acc.logout": "Scollega dall’account Tailscale",
+  "acc.off": "Spegni Tailscale",
+  "acc.off_confirm": "<strong>Spegnere Tailscale?</strong> Le rotte pubblicate smettono di funzionare e la scheda non è raggiungibile da remoto finché non lo riaccendi da qui (non serve un nuovo accesso).",
+  "acc.off_yes": "Sì, spegni",
   "acc.logout_confirm": "<strong>Scollegare questa scheda dall’account?</strong> Le rotte pubblicate smettono di funzionare e la scheda non sarà più raggiungibile da remoto finché non la ricolleghi da qui (serve di nuovo un link o una chiave).",
   "acc.logout_yes": "Sì, scollega",
   "acc.cancel": "Annulla",
@@ -342,6 +345,8 @@
   "Apply error": "Errore applicazione",
   "Not verified": "Non verificato",
   "Active (dynamic address)": "Attivo (indirizzo dinamico)",
-  "Active": "Attivo"
+  "Active": "Attivo",
+  "Unable to turn Tailscale off: ": "Impossibile spegnere Tailscale: ",
+  "Unable to turn Tailscale off: no answer.": "Impossibile spegnere Tailscale: nessuna risposta."
  }
 }

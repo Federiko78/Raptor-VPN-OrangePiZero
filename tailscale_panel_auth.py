@@ -80,10 +80,11 @@ def validate(body):
     allowed = {'login_url': {'action', 'hostname'},
                'login_key': {'action', 'key', 'tags', 'hostname'},
                'connect': {'action'},
+               'down': {'action'},
                'logout': {'action'}}.get(action)
     if allowed is None or not set(body) <= allowed:
         raise Refused('Invalid request.')
-    if action in ('logout', 'connect'):
+    if action in ('logout', 'connect', 'down'):
         return action, {}
     params = {'hostname': check_hostname(body.get('hostname'))}
     if action == 'login_key':
@@ -194,6 +195,15 @@ def connect(_params):
     raise Refused('Unable to reactivate Tailscale: ' + (scrub(text) or 'no answer.'))
 
 
+def down(_params):
+    """Spegne Tailscale (tailscale down): resta autenticata, si riaccende con "connect" senza un nuovo accesso."""
+    code, text = run([TAILSCALE, 'down'], 30)
+    state, _ = backend_state()
+    if state == 'Stopped' or (code == 0 and state != 'Running'):
+        return {'ok': True}
+    raise Refused('Unable to turn Tailscale off: ' + (scrub(text) or 'no answer.'))
+
+
 def logout(_params):
     code, text = run([TAILSCALE, 'logout'], 30)
     if code != 0:
@@ -201,7 +211,7 @@ def logout(_params):
     return {'ok': True}
 
 
-ACTIONS = {'login_url': login_url, 'login_key': login_key, 'connect': connect, 'logout': logout}
+ACTIONS = {'login_url': login_url, 'login_key': login_key, 'connect': connect, 'down': down, 'logout': logout}
 
 
 def main():

@@ -40,6 +40,12 @@ if args[:1] in (['login'], ['up']):
         cfg['status'] = cfg['after_login_status']
         json.dump(cfg, open(os.path.join(base, 'cfg.json'), 'w'))
     sys.exit(cfg.get('login_code', 0))
+if args[:1] == ['down']:
+    sys.stdout.write(cfg.get('down_out', ''))
+    if cfg.get('after_down_status'):
+        cfg['status'] = cfg['after_down_status']
+        json.dump(cfg, open(os.path.join(base, 'cfg.json'), 'w'))
+    sys.exit(cfg.get('down_code', 0))
 if args[:1] == ['logout']:
     sys.stdout.write(cfg.get('logout_out', ''))
     sys.exit(cfg.get('logout_code', 0))
@@ -92,9 +98,10 @@ class ValidationTests(Base):
         self.assertEqual(a.validate({'action': 'login_key', 'key': ' ' + KEY + ' ', 'tags': ['tag:cliente', 'tag:cliente', 'tag:vpn-1']}),
                          ('login_key', {'hostname': '', 'key': KEY, 'tags': ['tag:cliente', 'tag:vpn-1']}))
         self.assertEqual(a.validate({'action': 'logout'}), ('logout', {}))
+        self.assertEqual(a.validate({'action': 'down'}), ('down', {}))
 
     def test_rejected_requests(self):
-        bad = [None, [], 'x', {}, {'action': 5}, {'action': 'rm'}, {'action': 'logout', 'x': 1},
+        bad = [None, [], 'x', {}, {'action': 5}, {'action': 'rm'}, {'action': 'logout', 'x': 1}, {'action': 'down', 'x': 1},
                {'action': 'login_url', 'key': KEY}, {'action': 'login_key'},
                {'action': 'login_key', 'key': 'password123'},
                {'action': 'login_key', 'key': KEY + ' --ssh'},
@@ -219,6 +226,41 @@ class LogoutTests(Base):
         code, result = self.main({'action': 'logout'})
         self.assertEqual(code, 1)
         self.assertIn('permission denied', result['error'])
+
+
+class DownTests(Base):
+    def test_turn_off_runs_tailscale_down_and_nothing_else(self):
+        self.configure(status={'BackendState': 'Running'}, after_down_status={'BackendState': 'Stopped'}, down_out='')
+        self.assertEqual(self.main({'action': 'down'}), (0, {'ok': True}))
+        self.assertEqual([c for c in self.calls() if c[:1] != ['status']], [['down']], 'nessuna opzione, nessun logout')
+
+    def test_it_can_be_turned_on_again_without_a_new_login(self):
+        self.configure(status={'BackendState': 'Running'}, after_down_status={'BackendState': 'Stopped'})
+        self.main({'action': 'down'})
+        self.configure(status={'BackendState': 'Stopped'}, after_login_status={'BackendState': 'Running'}, login_out='Success.\n')
+        self.assertEqual(self.main({'action': 'connect'}), (0, {'ok': True, 'connected': True}))
+        self.assertEqual([c for c in self.calls() if c[:1] == ['logout']], [])
+
+    def test_already_stopped_is_success_even_if_the_command_complains(self):
+        self.configure(status={'BackendState': 'Stopped'}, down_code=1, down_out='already stopped\n')
+        self.assertEqual(self.main({'action': 'down'}), (0, {'ok': True}))
+
+    def test_failure_is_reported_with_the_reason(self):
+        self.configure(status={'BackendState': 'Running'}, down_code=1, down_out='permission denied\n')
+        code, result = self.main({'action': 'down'})
+        self.assertEqual(code, 1)
+        self.assertEqual(result['error'], 'Unable to turn Tailscale off: permission denied')
+
+    def test_a_board_that_is_still_running_is_an_error_even_with_exit_code_zero(self):
+        self.configure(status={'BackendState': 'Running'})
+        code, result = self.main({'action': 'down'})
+        self.assertEqual(code, 1)
+        self.assertTrue(result['error'].startswith('Unable to turn Tailscale off: '))
+
+    def test_takes_no_extra_fields(self):
+        code, _ = self.main({'action': 'down', 'tags': ['tag:x']})
+        self.assertEqual(code, 1)
+        self.assertEqual([c for c in self.calls() if c[:1] == ['down']], [])
 
 
 class ConnectTests(Base):
