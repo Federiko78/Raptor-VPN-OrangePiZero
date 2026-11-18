@@ -53,6 +53,8 @@ def current_lan():
     for interface in result:
         for addr in interface.get('addr_info', []):
             if addr.get('family') == 'inet' and addr.get('scope') == 'global':
+                if str(addr.get('local', '')).startswith('169.254.'):
+                    continue  # indirizzo di recupero: non e' la LAN del cliente
                 local = ipaddress.IPv4Address(addr['local'])
                 net = ipaddress.IPv4Network('%s/%s' % (local, addr['prefixlen']), strict=False)
                 if not local.is_private or net.num_addresses < 4:

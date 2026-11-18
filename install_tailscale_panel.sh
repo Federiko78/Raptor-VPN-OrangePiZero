@@ -130,7 +130,7 @@ fi
 case "$LAN_DEV" in
   ''|*[!a-zA-Z0-9_.-]*) echo "ERRORE: nome interfaccia non valido: $LAN_DEV" >&2; exit 1;;
 esac
-LAN_IP=$(ip -4 -o addr show dev "$LAN_DEV" scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')
+LAN_IP=$(ip -4 -o addr show dev "$LAN_DEV" scope global | awk '{split($4,a,"/"); if (a[1] !~ /^169\.254\./) {print a[1]; exit}}')
 if [ -z "$LAN_IP" ]; then
   echo "ATTENZIONE: al momento l'interfaccia $LAN_DEV non ha un IP DHCP." >&2
 fi

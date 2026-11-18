@@ -102,7 +102,7 @@ else
   line 'IP forwarding IPv4' 'ERRORE: disabilitato'; ok=0
 fi
 line 'Spazio root libero (MiB)' "$(df -Pm / | awk 'NR==2 {print $4}')"
-LAN_IP=$(ip -4 -o addr show dev end0 scope global 2>/dev/null | awk 'NR==1 {split($4,a,"/"); print a[1]}')
+LAN_IP=$(ip -4 -o addr show dev end0 scope global 2>/dev/null | awk '{split($4,a,"/"); if (a[1] !~ /^169\.254\./) {print a[1]; exit}}')
 line 'IP attuale end0' "${LAN_IP:-non assegnato}"
 if [ -n "$LAN_IP" ]; then
   STATUS=$(curl --noproxy '*' -sk --connect-timeout 5 --max-time 8 -o /dev/null -w '%{http_code}' "https://$LAN_IP:8443/login" 2>/dev/null || true)
@@ -124,6 +124,31 @@ if command -v runuser >/dev/null 2>&1 && [ -x /usr/local/libexec/tailscale-panel
   else
     line 'Netplan helper / sudo' 'ERRORE'; ok=0
   fi
+fi
+# Accesso di servizio (consigliato per le schede da consegnare ai clienti).
+if [ -r /etc/raptor-recovery.conf ]; then
+  RIP=$(sed -n 's/^RECOVERY_IP=//p' /etc/raptor-recovery.conf | head -n 1)
+  if [ -n "$RIP" ] && ip -4 addr show dev end0 2>/dev/null | grep -qF "inet $RIP/" \
+     && grep -qF "$RIP/16" /etc/netplan/90-tailscale-panel-end0.yaml 2>/dev/null; then
+    if ip -4 -o addr show dev end0 2>/dev/null | grep -F "inet $RIP/" | grep -q 'scope link'; then
+      line 'IP di recupero' 'OK (attivo, persistente, scope link)'
+    else
+      line 'IP di recupero' 'OK ma scope global: Avahi potrebbe annunciarlo (vedi ACCESSO_DI_SERVIZIO.md)'
+    fi
+  else
+    line 'IP di recupero' 'ERRORE: configurato ma non attivo o non persistente'; ok=0
+  fi
+else
+  line 'IP di recupero' 'non configurato (consigliato: sh install_access.sh)'
+fi
+if [ -x /usr/local/libexec/raptor-ap ]; then
+  if [ "$(systemctl is-enabled raptor-ap.service 2>/dev/null || true)" = enabled ]; then
+    line 'Wi-Fi annuncio IP' 'OK (abilitato)'
+  else
+    line 'Wi-Fi annuncio IP' 'installato ma disattivato'
+  fi
+else
+  line 'Wi-Fi annuncio IP' 'non installato (facoltativo)'
 fi
 printf '\n'
 if [ "$ok" = 1 ]; then

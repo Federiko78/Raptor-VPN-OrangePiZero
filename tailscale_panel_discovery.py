@@ -34,6 +34,8 @@ def discover_network():
     for iface in interfaces:
         for item in iface.get('addr_info',[]):
             if item.get('family') == 'inet' and item.get('scope') == 'global':
+                if str(item.get('local', '')).startswith('169.254.'):
+                    continue  # indirizzo di recupero: non e' la LAN del cliente
                 local = ipaddress.IPv4Address(item['local'])
                 net = ipaddress.IPv4Network('%s/%s' % (local,item['prefixlen']),strict=False)
                 if not net.is_private or net.num_addresses > 1024:

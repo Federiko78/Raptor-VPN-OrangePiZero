@@ -15,6 +15,8 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - **Guard di forwarding** `iptables -t mangle` che parte prima di `tailscaled` e blocca per default `tailscale0 → LAN`.
 - DHCP o IP statico via Netplan, con **conferma entro 150 s** e rollback automatico.
 - Helper root con schema JSON fisso, nessuna shell; `sudo` limitato a tre comandi senza argomenti.
+- **Wi-Fi "Raptor VPN - <IP>"** per ~1 minuto dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
+- **IP di recupero** `169.254.X.Y` scelto da te: raggiunge sempre il pannello dalla stessa LAN, anche con Tailscale spento o IP sconosciuto (la password resta obbligatoria). Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Requisiti
 
@@ -36,6 +38,7 @@ L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenz
 
 ## Sicurezza
 
+- Password del pannello: minimo **12** caratteri. Script di hardening di SSH, sistema e firewall in ingresso in [`hardening/`](hardening/README.md).
 - **Non aprire la porta TCP 8443 su Internet.**
 - Il guard filtra solo il forwarding `tailscale0 → end0`: usa anche le **Grants/ACL Tailscale** e verifica che nessun altro subnet router pubblichi la stessa rete.
 - Non committare mai `auth.json`, `*.pem`, `tailscaled.state`, `policy.json`: sono già nel `.gitignore`.
@@ -44,6 +47,9 @@ L'installer è pensato **solo per un Armbian pulito**: si ferma se trova credenz
 
 ```sh
 python3 test_release.py      # test simulati, non toccano la rete
+python3 test_security.py     # server HTTPS reale su 127.0.0.1 (serve openssl)
+python3 test_access.py       # IP di recupero
+python3 test_ap.py           # Wi-Fi annuncio-IP
 sha256sum -c SHA256SUMS      # integrità del pacchetto (usata da install_factory.sh)
 ```
 

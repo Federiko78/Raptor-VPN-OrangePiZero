@@ -21,3 +21,6 @@ audit-*/
 report.txt
 *.tar.gz
 *.zip
+
+# IP di recupero (riservato, vive solo sulla scheda)
+raptor-recovery.conf

@@ -177,6 +177,8 @@ def lan_details():
                 if addr.get('family') != 'inet' or addr.get('scope') != 'global':
                     continue
                 ip = addr.get('local','')
+                if ip.startswith('169.254.'):
+                    continue  # indirizzo di recupero (link-local): mai mostrato come IP LAN
                 mask = addr.get('prefixlen', 24)
                 network = ipaddress.ip_network('%s/%s' % (ip,mask), strict=False)
                 if not isinstance(network, ipaddress.IPv4Network):
