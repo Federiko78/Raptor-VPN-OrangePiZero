@@ -33,7 +33,7 @@ class ConfTests(unittest.TestCase):
     def test_bad_values_fall_back(self):
         text = 'ENABLED=si\nDURATION=5\nCHANNEL=14\nIFACE=wlan0; reboot\nWAIT_IP=-1\nSTRANO\n'
         self.assertEqual(ap.parse_conf(text), ap.DEFAULTS)
-        self.assertEqual(ap.parse_conf('DURATION=100000')['DURATION'], 60)
+        self.assertEqual(ap.parse_conf('DURATION=100000')['DURATION'], 180)
         self.assertEqual(ap.parse_conf('IFACE=../etc')['IFACE'], 'wlan0')
 
 
@@ -48,12 +48,12 @@ class InstalledConfTests(unittest.TestCase):
 
     def test_installed_file_parses_to_its_own_values(self):
         conf = ap.parse_conf(self.installed_text())
-        self.assertEqual(conf, {'ENABLED': 1, 'DURATION': 60, 'CHANNEL': 6, 'IFACE': 'wlan0', 'WAIT_IP': 90})
+        self.assertEqual(conf, {'ENABLED': 1, 'DURATION': 180, 'CHANNEL': 6, 'IFACE': 'wlan0', 'WAIT_IP': 90})
 
     def test_editing_the_installed_file_takes_effect(self):
-        text = self.installed_text().replace('ENABLED=1', 'ENABLED=0').replace('DURATION=60', 'DURATION=180')
+        text = self.installed_text().replace('ENABLED=1', 'ENABLED=0').replace('DURATION=180', 'DURATION=90')
         conf = ap.parse_conf(text)
-        self.assertEqual((conf['ENABLED'], conf['DURATION']), (0, 180))
+        self.assertEqual((conf['ENABLED'], conf['DURATION']), (0, 90))
 
     def test_inline_comment_forms(self):
         self.assertEqual(ap.parse_conf('DURATION=90   # novanta')['DURATION'], 90)

@@ -23,6 +23,11 @@ from password_policy import password_error, POLICY_DESCRIPTION
 
 AUTH_PATH = '/etc/tailscale-panel/auth.json'
 STATE_PATH = '/var/lib/tailscale-panel/settings.json'
+# Registro eventi scritto SOLO da raptor-eventlog (root): il pannello lo legge e basta.
+EVENTS_PATH = '/var/lib/raptor-events/events.jsonl'
+EVENTS_TAIL_BYTES = 128 * 1024     # si legge solo la coda del file
+EVENTS_LIMIT = 200                 # eventi restituiti (i piu' recenti)
+EVENT_TYPES = ('boot', 'shutdown', 'unclean_shutdown', 'clock_synced')
 CERT_PATH = '/etc/tailscale-panel/cert.pem'
 KEY_PATH = '/etc/tailscale-panel/key.pem'
 HELPER = '/usr/local/libexec/tailscale-panel-helper'
@@ -204,6 +209,74 @@ def lan_details():
         return details
 
 
+def _event_int(value):
+    """Intero ragionevole (secondi Unix tra il 2001 e il 2100) oppure None."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 1_000_000_000 <= value <= 4_102_444_800 else None
+
+
+def events_data(path=None, now=None):
+    """Registro eventi per l'interfaccia: sola lettura, ogni campo controllato (mai HTML grezzo)."""
+    path = path or EVENTS_PATH
+    now = time.time() if now is None else now
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - EVENTS_TAIL_BYTES))
+            raw = handle.read(EVENTS_TAIL_BYTES + 1)
+    except FileNotFoundError:
+        return {'available': False, 'reason': 'Registro eventi non ancora attivo su questa scheda (installare raptor-eventlog).'}
+    except OSError:
+        return {'available': False, 'reason': 'Registro eventi non leggibile.'}
+    lines = raw.decode('utf-8', 'replace').splitlines()
+    if size > EVENTS_TAIL_BYTES and lines:
+        lines = lines[1:]                      # la prima riga della coda puo' essere tagliata a meta'
+    events = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue                          # ultima riga rovinata da uno spegnimento di colpo
+        if not isinstance(item, dict) or item.get('type') not in EVENT_TYPES:
+            continue
+        epoch = _event_int(item.get('epoch'))
+        if epoch is None:
+            continue
+        clean = {'type': item['type'], 'epoch': epoch}
+        for key in ('previous', 'kind'):
+            value = item.get(key)
+            if isinstance(value, str) and 0 < len(value) <= 32 and all(c.islower() or c == '_' for c in value):
+                clean[key] = value
+        for key in ('clock_synced', 'logged_late'):
+            if isinstance(item.get(key), bool):
+                clean[key] = item[key]
+        for key in ('last_seen_epoch', 'previous_last_seen_epoch', 'detected_epoch'):
+            value = _event_int(item.get(key))
+            if value is not None:
+                clean[key] = value
+        jump = item.get('jump_seconds')
+        if isinstance(jump, int) and not isinstance(jump, bool) and abs(jump) < 10 ** 9:
+            clean['jump_seconds'] = jump
+        events.append(clean)
+    try:
+        with open('/proc/uptime') as handle:
+            uptime = int(float(handle.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        uptime = 0
+    month_ago = now - 30 * 86400
+    recent = [e for e in events if e['epoch'] >= month_ago]
+    unclean = [e for e in events if e['type'] == 'unclean_shutdown']
+    return {'available': True,
+            'events': events[-EVENTS_LIMIT:][::-1],            # piu' recenti per primi (ordine di scrittura)
+            'summary': {'now': int(now), 'uptime_seconds': uptime, 'boot_epoch': int(now - uptime),
+                        'boots_30d': sum(1 for e in recent if e['type'] == 'boot'),
+                        'unclean_30d': sum(1 for e in recent if e['type'] == 'unclean_shutdown'),
+                        'last_unclean_epoch': unclean[-1]['epoch'] if unclean else None,
+                        'total': len(events)}}
+
+
 def status_data():
     result = {'backend':'Non disponibile', 'tailscale_ip':'-', 'hostname':'-',
               'tailnet':'-', 'error':'', 'version':'-', 'lan':lan_details(),
@@ -279,6 +352,7 @@ h1{font-size:26px;margin:0;letter-spacing:-.6px}.uiversion{font-size:12px;color:
 .action:disabled{opacity:.5;cursor:wait}.quiet{background:transparent;border:1px solid #395072;color:#bdd3ef;padding:10px 14px;border-radius:10px;cursor:pointer}
 .footer{display:flex;align-items:center;gap:15px;margin-top:20px;flex-wrap:wrap}#message{font-weight:600}.ok{color:#41dbb4}.err{color:#ff9ba1}
 .discoverycard{margin-top:16px}.devlist{margin-top:14px;display:grid;gap:8px}.device{display:flex;gap:12px;align-items:flex-start;padding:13px;border:1px solid #293b58;border-radius:12px;background:#101b2d}.device input{margin-top:5px;accent-color:#28c4ac}.deviceinfo{min-width:0}.deviceinfo strong{display:block}.deviceinfo small{display:block;margin-top:3px;overflow-wrap:anywhere}.scanmeta{margin-top:10px;color:#9eafc9;font-size:13px}.securitycard{margin-top:16px}.passwordinfo{font-size:13px;color:#9eafc9;margin-top:8px}.notice{padding:13px 16px;border:1px solid #395275;border-radius:11px;background:#13243a;color:#b6d0ee;line-height:1.6;margin-top:15px}.value{font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#dbe8fa;overflow-wrap:anywhere}
+.eventscard{margin-top:16px}.device.alertrow{border-color:#8a5a2c;background:#2a1d10}.device.alertrow strong{color:#ffc084}.evtime{font-variant-numeric:tabular-nums}
 a{color:#7cd6ef}.login{max-width:435px;margin:12vh auto;padding:32px}.login h1{margin:15px 0}ul{padding-left:20px;color:#b4c6dd;line-height:1.9}
 @media(max-width:770px){.formgrid{grid-template-columns:1fr}.shell{grid-template-columns:1fr}.columns{grid-template-columns:1fr}main{padding:24px 15px}h1{font-size:22px}}
 '''
@@ -350,7 +424,14 @@ DASH = '''<main><header class="head"><div class="logo"><div class="emblem">TS</d
 <div class="field"><label for="repeatPassword">Conferma nuova password</label><input id="repeatPassword" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></div>
 </div><div class="passwordinfo">Minimo 12 caratteri, con almeno una maiuscola, una minuscola e un numero. Simboli facoltativi. È consigliata una password lunga e univoca.</div>
 <div class="footer"><button class="action" id="changePassword" type="submit">Cambia password</button><span id="passwordMessage" role="status"></span></div>
-</form></section></main>
+</form></section>
+<section class="card eventscard" id="events"><h2 class="subhead">Eventi · Riavvii e stato del sistema</h2>
+<p>Registro conservato sulla scheda (anche dopo uno spegnimento): avvii, spegnimenti regolari e <strong>spegnimenti anomali</strong>, cioè mancanza di corrente o blocco. Gli orari sono quelli del tuo computer.</p>
+<div id="eventsSummary" class="scanmeta">Caricamento...</div>
+<div class="buttonrow"><button class="quiet" id="refreshEvents" type="button">Aggiorna eventi</button><span id="eventsMsg" class="netmessage" role="status"></span></div>
+<div id="eventsList" class="devlist"></div>
+<div class="notice">Senza batteria la scheda parte con l’orologio indietro finché non si sincronizza con Internet: finché non compare “Orologio sincronizzato”, gli orari dell’ultimo avvio possono essere sbagliati. Dopo una mancanza di corrente, l’ultimo segno di vita indica entro quando è avvenuta (al massimo 5 minuti prima).</div>
+</section></main>
 <script>
 const csrf = '__CSRF__';
 const $ = id => document.getElementById(id);
@@ -507,7 +588,46 @@ $('passwordForm').addEventListener('submit',async e=>{
  finally{$('changePassword').disabled=false;}
 });
 setInterval(()=>{if(pendingId){refresh();}},6000);
+const EVENT_LABELS={boot:'Avvio',shutdown:'Spegnimento',unclean_shutdown:'Spegnimento anomalo (corrente mancata o blocco)',clock_synced:'Orologio sincronizzato'};
+const PREV_LABELS={first_boot:'primo avvio registrato',clean_reboot:'dopo un riavvio regolare',clean_poweroff:'dopo uno spegnimento regolare',clean_halt:'dopo un arresto regolare',clean_unknown:'dopo uno spegnimento regolare',unclean:'dopo uno spegnimento anomalo',unknown:'stato precedente non leggibile'};
+const KIND_LABELS={reboot:'riavvio',poweroff:'spegnimento',halt:'arresto',unknown:'tipo non rilevato'};
+const fmtDate=e=>new Date(e*1000).toLocaleString('it-IT');
+function fmtSpan(s){const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+' g ':'')+(h||d?h+' h ':'')+m+' min';}
+function eventDetail(e){
+ const parts=[];
+ if(e.type==='boot'){parts.push(PREV_LABELS[e.previous]||'stato precedente sconosciuto');
+  if(e.clock_synced===false)parts.push('orario non ancora sincronizzato');
+  if(e.logged_late)parts.push('registrato a scheda già accesa (installazione)');}
+ if(e.type==='shutdown')parts.push(KIND_LABELS[e.kind]||'tipo non rilevato');
+ if(e.type==='unclean_shutdown'&&e.last_seen_epoch)parts.push('ultimo segno di vita: '+fmtDate(e.last_seen_epoch));
+ if(e.type==='clock_synced'&&typeof e.jump_seconds==='number')parts.push('correzione dell’orologio: '+e.jump_seconds+' s');
+ return parts.join(' · ');
+}
+async function loadEvents(){
+ const list=$('eventsList'),sum=$('eventsSummary'),msg=$('eventsMsg');
+ $('refreshEvents').disabled=true;msg.textContent='';
+ try{
+  const response=await fetch('/api/events',{cache:'no-store'});
+  if(!response.ok)throw Error('Sessione scaduta: ricarica la pagina');
+  const data=await response.json();list.replaceChildren();
+  if(!data.available){sum.textContent=data.reason||'Registro non disponibile.';return;}
+  const s=data.summary;
+  sum.textContent='In funzione da '+fmtSpan(s.uptime_seconds)+' (avvio: '+fmtDate(s.boot_epoch)+') · Avvii negli ultimi 30 giorni: '+s.boots_30d+' · Spegnimenti anomali negli ultimi 30 giorni: '+s.unclean_30d+(s.last_unclean_epoch?' (ultimo: '+fmtDate(s.last_unclean_epoch)+')':'');
+  if(!data.events.length){sum.textContent+=' · Nessun evento registrato.';}
+  for(const e of data.events){
+   const row=document.createElement('div');row.className='device'+(e.type==='unclean_shutdown'?' alertrow':'');
+   const info=document.createElement('div');info.className='deviceinfo';
+   const title=document.createElement('strong');title.textContent=EVENT_LABELS[e.type]||e.type;
+   const when=document.createElement('small');when.className='evtime';when.textContent=fmtDate(e.epoch);
+   const detail=document.createElement('small');detail.textContent=eventDetail(e);
+   info.append(title,when);if(detail.textContent)info.append(detail);row.append(info);list.append(row);
+  }
+ }catch(error){msg.textContent=error.message;msg.className='netmessage err';}
+ finally{$('refreshEvents').disabled=false;}
+}
+$('refreshEvents').addEventListener('click',loadEvents);
 refresh();
+loadEvents();
 </script>'''
 
 
@@ -647,6 +767,10 @@ class Handler(BaseHTTPRequestHandler):
             if not self._session():
                 return self._json(401, {'error':'Accesso richiesto'})
             return self._json(200, status_data())
+        if path == '/api/events':
+            if not self._session():
+                return self._json(401, {'error':'Accesso richiesto'})
+            return self._json(200, events_data())
         return self._send(404, 'Non trovato', 'text/plain; charset=utf-8')
 
     def do_POST(self):

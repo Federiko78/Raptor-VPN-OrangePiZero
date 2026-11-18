@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Raptor VPN - Wi-Fi temporaneo che annuncia l'indirizzo IP della scheda.
 
-Dopo l'avvio, appena la porta Ethernet ha un IP (DHCP o statico), la scheda apre per circa un
-minuto una rete Wi-Fi chiamata "Raptor VPN - <IP>". L'installatore legge l'IP dall'elenco delle
+Dopo l'avvio, appena la porta Ethernet ha un IP (DHCP o statico), la scheda apre per circa 3
+minuti una rete Wi-Fi chiamata "Raptor VPN - <IP>". L'installatore legge l'IP dall'elenco delle
 reti Wi-Fi del telefono, senza collegarsi a nulla.
 
 Non e' un punto di accesso utilizzabile, di proposito:
   - password WPA2 casuale, generata a ogni avvio e mai mostrata ne' salvata;
   - in piu' hostapd rifiuta ogni dispositivo (lista MAC ammessi vuota);
   - nessun server DHCP, nessun IP su wlan0, nessun inoltro verso la LAN, nessuna socket di controllo.
-Passato il minuto l'AP si spegne e l'interfaccia viene messa giu'.
+Passato il tempo (DURATION, predefinito 180 s) l'AP si spegne e l'interfaccia viene messa giu'.
 
 Configurazione opzionale in /etc/raptor-ap.conf (ENABLED, DURATION, CHANNEL, IFACE, WAIT_IP).
 Il servizio e' raptor-ap.service; per rilanciarlo a mano:  systemctl restart raptor-ap
@@ -33,7 +33,7 @@ RUN_DIR = pathlib.Path('/run/raptor-ap')
 PREFIX = 'Raptor VPN - '
 NO_IP = 'nessun IP'
 IFACE_WAIT = 60   # secondi di attesa massima del driver Wi-Fi dopo aver ottenuto l'IP
-DEFAULTS = {'ENABLED': 1, 'DURATION': 60, 'CHANNEL': 6, 'IFACE': 'wlan0', 'WAIT_IP': 90}
+DEFAULTS = {'ENABLED': 1, 'DURATION': 180, 'CHANNEL': 6, 'IFACE': 'wlan0', 'WAIT_IP': 90}
 STOP = threading.Event()
 
 
@@ -49,7 +49,7 @@ def parse_conf(text):
         if not line or line.startswith('#') or '=' not in line:
             continue
         key, value = (x.strip() for x in line.split('=', 1))
-        value = value.split('#', 1)[0].strip()   # commento sulla stessa riga: DURATION=60  # secondi
+        value = value.split('#', 1)[0].strip()   # commento sulla stessa riga: DURATION=180  # secondi
         if key == 'ENABLED' and value in ('0', '1'):
             conf[key] = int(value)
         elif key == 'DURATION' and value.isdigit() and 20 <= int(value) <= 300:

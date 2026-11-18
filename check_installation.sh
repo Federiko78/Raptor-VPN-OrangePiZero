@@ -149,6 +149,17 @@ if [ -r /etc/raptor-recovery.conf ]; then
 else
   line 'IP di recupero' 'non configurato (consigliato: sh install_access.sh)'
 fi
+if [ -x /usr/local/libexec/raptor-eventlog ]; then
+  if [ "$(systemctl is-enabled raptor-eventlog.service 2>/dev/null || true)" = enabled ] \
+     && [ "$(systemctl is-enabled raptor-eventlog-heartbeat.timer 2>/dev/null || true)" = enabled ] \
+     && [ -s /var/lib/raptor-events/events.jsonl ]; then
+    line 'Registro eventi' 'OK (attivo, battito ogni 5 min)'
+  else
+    line 'Registro eventi' 'ERRORE: servizi non abilitati o registro vuoto (sh install_eventlog.sh)'; ok=0
+  fi
+else
+  line 'Registro eventi' 'non installato (consigliato: sh install_eventlog.sh)'
+fi
 if [ -x /usr/local/libexec/raptor-ap ]; then
   if [ "$(systemctl is-enabled raptor-ap.service 2>/dev/null || true)" = enabled ]; then
     line 'Wi-Fi annuncio IP' 'OK (abilitato)'

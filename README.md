@@ -15,7 +15,8 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - **Guard di forwarding** `iptables -t mangle` che parte prima di `tailscaled` e blocca per default `tailscale0 → LAN`.
 - DHCP o IP statico via Netplan, con **conferma entro 150 s** e rollback automatico.
 - Helper root con schema JSON fisso, nessuna shell; `sudo` limitato a tre comandi senza argomenti.
-- **Wi-Fi "Raptor VPN - <IP>"** per ~1 minuto dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
+- **Wi-Fi "Raptor VPN - <IP>"** per ~3 minuti dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
+- **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello. Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
 - **IP di recupero** `169.254.X.Y` scelto da te: raggiunge sempre il pannello dalla stessa LAN, anche con Tailscale spento o IP sconosciuto (la password resta obbligatoria). Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Sistema operativo richiesto
@@ -63,8 +64,12 @@ python3 test_release.py      # test simulati, non toccano la rete
 python3 test_security.py     # server HTTPS reale su 127.0.0.1 (serve openssl)
 python3 test_access.py       # IP di recupero
 python3 test_ap.py           # Wi-Fi annuncio-IP
+python3 test_eventlog.py     # registro eventi (scrittore)
+python3 test_panel_events.py # registro eventi (lettura nel pannello)
 sha256sum -c SHA256SUMS      # integrità del pacchetto (usata da install_factory.sh)
 ```
+
+Per aggiornare una scheda già installata: `cd Raptor-VPN-OrangePiZero && sh update.sh`.
 
 Se modifichi i file del pacchetto, rigenera `SHA256SUMS`, altrimenti l'installer si ferma alla verifica di integrità.
 

@@ -99,9 +99,9 @@ say 'Wi-Fi che annuncia l’indirizzo IP (Raptor VPN - <IP>)'
 if [ -z "$AP" ]; then
   if [ -t 0 ]; then
     cat <<'TEXT'
-Dopo ogni avvio la scheda apre per circa 1 minuto una rete Wi-Fi chiamata "Raptor VPN - <IP>"
+Dopo ogni avvio la scheda apre per circa 3 minuti una rete Wi-Fi chiamata "Raptor VPN - <IP>"
 (non e' collegabile: serve solo a leggere l'IP dal telefono). Chiunque sia nel raggio Wi-Fi
-puo' leggere quell'IP durante il minuto: se non vuoi, rispondi n.
+puo' leggere quell'IP in quei minuti: se non vuoi, rispondi n.
 TEXT
     printf 'Attivare il Wi-Fi che annuncia l’IP? [S/n]: '
     IFS= read -r ANSWER || die 'Impossibile leggere la scelta dal terminale'
@@ -132,7 +132,7 @@ PYCOMPILE
     cat > "$AP_CONF" <<'EOF'
 # Raptor VPN - Wi-Fi che annuncia l'IP. Modifica e poi: systemctl restart raptor-ap
 ENABLED=1      # 0 = mai
-DURATION=60    # secondi di vita della rete (20-300)
+DURATION=180   # secondi di vita della rete (20-300)
 CHANNEL=6      # canale 1-11
 IFACE=wlan0
 WAIT_IP=90     # secondi massimi di attesa dell'IP prima di annunciare "nessun IP"
@@ -170,8 +170,8 @@ EOF
   systemctl enable raptor-ap.service >/dev/null 2>&1 || die 'Impossibile abilitare raptor-ap.service'
   [ "$(systemctl is-enabled raptor-ap.service 2>/dev/null || true)" = enabled ] || die 'raptor-ap.service non risulta abilitato (mascherato?): controllare systemctl status raptor-ap'
   systemctl restart --no-block raptor-ap.service || true
-  echo 'Wi-Fi annuncio-IP installato: parte ad ogni avvio, dopo il DHCP, per circa 1 minuto.'
-  echo 'Prova subito: sul telefono cerca la rete "Raptor VPN - <IP>" (per ~1 minuto).'
+  echo 'Wi-Fi annuncio-IP installato: parte ad ogni avvio, dopo il DHCP, per circa 3 minuti.'
+  echo 'Prova subito: sul telefono cerca la rete "Raptor VPN - <IP>" (per ~3 minuti).'
   echo 'Se la scheda si bloccasse con il Wi-Fi attivo: ENABLED=0 in /etc/raptor-ap.conf.'
 elif [ "$AP" = off ]; then
   if [ -e "$AP_UNIT" ]; then

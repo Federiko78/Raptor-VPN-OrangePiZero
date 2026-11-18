@@ -96,6 +96,31 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         return token, re.search(r"const csrf = '([^']+)'", html).group(1)
 
+    # ---------------------------------------------------------------- registro eventi
+    def test_events_api_requires_login(self):
+        status, _, body = self.request('GET', '/api/events')
+        self.assertEqual(status, 401)
+        self.assertNotIn('events', json.loads(body))
+
+    def test_events_api_returns_the_log_after_login(self):
+        log = pathlib.Path(self.tmp) / 'events.jsonl'
+        now = int(time.time())
+        log.write_text(json.dumps({'type': 'boot', 'epoch': now - 60, 'previous': 'unclean'}) + '\n')
+        token, _ = self.session()
+        with patch.object(p, 'EVENTS_PATH', str(log)):
+            status, _, body = self.request('GET', '/api/events', headers={'Cookie': token})
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertTrue(data['available'])
+        self.assertEqual(data['events'][0]['previous'], 'unclean')
+        self.assertEqual(data['summary']['unclean_30d'], 0)
+
+    def test_dashboard_contains_the_events_section(self):
+        token, _ = self.session()
+        status, _, html = self.request('GET', '/', headers={'Cookie': token})
+        self.assertEqual(status, 200)
+        self.assertIn('id="events"', html)
+
     def wait_for_free_slots(self, expected, seconds=5):
         deadline = time.time() + seconds
         while time.time() < deadline:
