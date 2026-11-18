@@ -121,6 +121,95 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn('id="events"', html)
 
+    # ---------------------------------------------------------------- accesso Tailscale dal pannello
+    TS_PATHS = ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect')
+
+    def post_json(self, path, payload, token, csrf, content_type='application/json'):
+        headers = {'Cookie': token, 'Content-Type': content_type}
+        if csrf is not None:
+            headers['X-CSRF-Token'] = csrf
+        return self.request('POST', path, body=json.dumps(payload), headers=headers)
+
+    def test_tailscale_routes_require_login(self):
+        for path in self.TS_PATHS:
+            with patch.object(p, 'tailscale_auth') as auth:
+                status, _, _ = self.request('POST', path, body='{}', headers={'Content-Type': 'application/json'})
+            self.assertEqual(status, 401, path)
+            auth.assert_not_called()
+
+    def test_tailscale_routes_require_csrf_and_json(self):
+        token, csrf = self.session()
+        for path in self.TS_PATHS:
+            with patch.object(p, 'tailscale_auth') as auth:
+                self.assertEqual(self.post_json(path, {}, token, None)[0], 403, path)
+                self.assertEqual(self.post_json(path, {}, token, 'sbagliato')[0], 403, path)
+                self.assertEqual(self.post_json(path, {}, token, csrf, 'text/plain')[0], 415, path)
+            auth.assert_not_called()
+
+    def test_tailscale_login_forwards_only_checked_fields(self):
+        token, csrf = self.session()
+        key = 'tskey-auth-kAbCdE12CNTRL-0123456789abcdef'
+        cases = [
+            ({'mode': 'url', 'hostname': 'raptor-1'}, {'action': 'login_url', 'hostname': 'raptor-1'}),
+            ({'mode': 'url'}, {'action': 'login_url', 'hostname': ''}),
+            ({'mode': 'key', 'key': key, 'tags': ['tag:a'], 'hostname': 'x'},
+             {'action': 'login_key', 'hostname': 'x', 'key': key, 'tags': ['tag:a']}),
+            ({'mode': 'key', 'key': key}, {'action': 'login_key', 'hostname': '', 'key': key, 'tags': []}),
+        ]
+        for payload, expected in cases:
+            with patch.object(p, 'tailscale_auth', return_value={'ok': True, 'connected': True}) as auth:
+                status, _, body = self.post_json('/api/tailscale/login', payload, token, csrf)
+            self.assertEqual(status, 200, payload)
+            auth.assert_called_once_with(expected)
+            self.assertNotIn(key, body)
+
+    def test_tailscale_login_rejects_bad_requests_before_the_helper(self):
+        token, csrf = self.session()
+        bad = [[], {}, {'mode': 'rm'}, {'mode': 'url', 'key': 'tskey-auth-xxxxxxxx'}, {'mode': 'url', 'tags': ['tag:a']},
+               {'mode': 'key', 'extra': 1}, {'mode': 'key', 'comando': '--ssh'}]
+        for payload in bad:
+            with patch.object(p, 'tailscale_auth') as auth:
+                status, _, _ = self.post_json('/api/tailscale/login', payload, token, csrf)
+            self.assertEqual(status, 400, payload)
+            auth.assert_not_called()
+        for path in ('/api/tailscale/logout', '/api/tailscale/connect'):
+            with patch.object(p, 'tailscale_auth') as auth:
+                self.assertEqual(self.post_json(path, {'tags': ['tag:a']}, token, csrf)[0], 400, path)
+            auth.assert_not_called()
+
+    def test_tailscale_logout_connect_and_failure(self):
+        token, csrf = self.session()
+        for path, action in (('/api/tailscale/logout', 'logout'), ('/api/tailscale/connect', 'connect')):
+            with patch.object(p, 'tailscale_auth', return_value={'ok': True}) as auth:
+                self.assertEqual(self.post_json(path, {}, token, csrf)[0], 200)
+            auth.assert_called_once_with({'action': action})
+        with patch.object(p, 'tailscale_auth', return_value={'ok': False, 'error': 'chiave scaduta'}):
+            status, _, body = self.post_json('/api/tailscale/login', {'mode': 'url'}, token, csrf)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)['error'], 'chiave scaduta')
+
+    def test_login_errors_are_shown_inside_the_card_and_csp_allows_only_data_images(self):
+        status, _, body = self.login('sbagliata-sbagliata')
+        self.assertEqual(status, 401)
+        self.assertRegex(body, re.compile(r'<section class="auth">.*<div class="authmsg" role="alert">Password non valida\.</div>.*</section>', re.S))
+        conn = http.client.HTTPSConnection('127.0.0.1', self.port, timeout=8, context=unverified_context())
+        try:
+            conn.request('GET', '/login')
+            csp = conn.getresponse().getheader('Content-Security-Policy')
+        finally:
+            conn.close()
+        self.assertIn("img-src data:", csp)
+        self.assertIn("default-src 'none'", csp)
+        self.assertNotIn('img-src *', csp)
+        self.assertNotIn('http:', csp)
+
+    def test_dashboard_contains_the_account_section(self):
+        token, _ = self.session()
+        status, _, html = self.request('GET', '/', headers={'Cookie': token})
+        self.assertEqual(status, 200)
+        for marker in ('id="account"', 'id="accForm"', 'id="accModeKey"', 'Raptor <b>VPN</b>'):
+            self.assertIn(marker, html)
+
     def wait_for_free_slots(self, expected, seconds=5):
         deadline = time.time() + seconds
         while time.time() < deadline:

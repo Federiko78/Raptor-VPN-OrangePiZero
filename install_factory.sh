@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tailscale Control Panel FACTORY R1.3.2 (app 1.5.0), Orange Pi Zero, Armbian Trixie Minimal.
+# Tailscale Control Panel FACTORY R1.3.2 (app 1.6.0), Orange Pi Zero, Armbian Trixie Minimal.
 # Fresh installation. No auth/Tailscale state is copied from another device.
 set -eu
 export LC_ALL=C
@@ -11,7 +11,7 @@ die() { printf '\nERRORE: %s\n' "$*" >&2; exit 1; }
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$BASE"
 command -v python3 >/dev/null 2>&1 || die 'python3 mancante: eseguire  apt-get update && apt-get install -y python3  (oppure usare bootstrap.sh)'
-for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py password_policy.py check_installation.sh backup_panel.sh restore_panel.sh; do
+for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py check_installation.sh backup_panel.sh restore_panel.sh; do
   [ -s "$f" ] || die "File mancante nel pacchetto: $f"
 done
 if [ -f SHA256SUMS ]; then
@@ -20,7 +20,7 @@ if [ -f SHA256SUMS ]; then
 fi
 
 say 'Preflight sorgenti (senza modifiche)'
-for module in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py password_policy.py raptor_ap.py raptor_eventlog.py; do
+for module in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py raptor_ap.py raptor_eventlog.py; do
   python3 - "$module" <<'PYCOMPILE' || die "Errore di sintassi in $module"
 import ast, sys
 with open(sys.argv[1], encoding='utf-8') as fd:
@@ -143,7 +143,7 @@ if systemctl list-unit-files --no-legend 'serial-getty@.service' 2>/dev/null | g
   fi
 fi
 
-say 'Installazione applicazione e servizi web v1.5.0'
+say 'Installazione applicazione e servizi web v1.6.0'
 if ! sh "$BASE/install_tailscale_panel.sh"; then
   sh "$BASE/restore_panel.sh" "$BACKUP_DIR" || true
   die 'Installer dell’applicazione non riuscito: tentato ripristino del pannello precedente'
@@ -171,7 +171,7 @@ printf '\n=====================================================\n'
 printf ' TAILSCALE CONTROL PANEL FACTORY R1.3.2 - INSTALLATO\n'
 printf '=====================================================\n'
 printf '1) Usa la password Web UI scelta durante l’installazione (non visualizzata).\n'
-printf '2) Autentica il nuovo dispositivo: tailscale up\n'
+printf '2) Collega Tailscale dal pannello (sezione Account Tailscale: link di accesso oppure chiave + tag). Vedi ACCOUNT_TAILSCALE.md.\n'
 printf '3) Apri https://IP-ETHERNET:8443 sul PC nella LAN.\n'
 printf '4) LAN OFF, nessun host scelto, nessuna rotta. Configura solo quando pronto.\n'
 printf '5) Prima di pubblicare subnet: regole tailnet + approvazione rotta.\n'

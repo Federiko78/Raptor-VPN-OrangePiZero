@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Tailscale Control Panel 1.5.0 - Selected LAN hosts, DHCP/static IP, HTTPS."""
+"""Raptor VPN - pannello Tailscale 1.6.0: accesso Tailscale, host LAN selezionati, DHCP/IP statico, HTTPS."""
 import base64
 import hashlib
 import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import string
@@ -20,6 +21,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from password_policy import password_error, POLICY_DESCRIPTION
+from panel_assets import EYE_B64
 
 AUTH_PATH = '/etc/tailscale-panel/auth.json'
 STATE_PATH = '/var/lib/tailscale-panel/settings.json'
@@ -33,6 +35,10 @@ KEY_PATH = '/etc/tailscale-panel/key.pem'
 HELPER = '/usr/local/libexec/tailscale-panel-helper'
 NET_HELPER = '/usr/local/libexec/tailscale-panel-net-helper'
 DISCOVERY_HELPER = '/usr/local/libexec/tailscale-panel-discovery'
+AUTH_HELPER = '/usr/local/libexec/tailscale-panel-auth'
+# Link di accesso Tailscale: ammesso solo https verso *.tailscale.com/a/<codice>.
+AUTH_URL_RE = re.compile(r'https://[A-Za-z0-9.-]+\.tailscale\.com/a/[A-Za-z0-9_-]{4,64}')
+TAG_RE = re.compile(r'tag:[a-z][a-z0-9-]{0,62}')
 PORT = int(os.environ.get('PANEL_PORT', '8443'))
 LAN_DEV = os.environ.get('PANEL_LAN_DEV', 'end0')
 SESSIONS = {}
@@ -280,7 +286,8 @@ def events_data(path=None, now=None):
 def status_data():
     result = {'backend':'Non disponibile', 'tailscale_ip':'-', 'hostname':'-',
               'tailnet':'-', 'error':'', 'version':'-', 'lan':lan_details(),
-              'forwarding':False, 'settings':saved_state(), 'cli_read_ok':False}
+              'forwarding':False, 'settings':saved_state(), 'cli_read_ok':False,
+              'auth_url':'', 'tags':[]}
     try:
         p = run(['/usr/bin/tailscale', 'status', '--json'])
         if p.returncode:
@@ -293,6 +300,12 @@ def status_data():
             result['tailscale_ip'] = ', '.join(self_node.get('TailscaleIPs') or []) or '-'
             tailnet = s.get('CurrentTailnet') or {}
             result['tailnet'] = tailnet.get('Name', '-')
+            url = s.get('AuthURL')
+            if isinstance(url, str) and AUTH_URL_RE.fullmatch(url):
+                result['auth_url'] = url
+            tags = self_node.get('Tags')
+            if isinstance(tags, list):
+                result['tags'] = [t for t in tags[:10] if isinstance(t, str) and TAG_RE.fullmatch(t)]
         v = run(['/usr/bin/tailscale', 'version'])
         if v.returncode == 0:
             result['version'] = v.stdout.splitlines()[0].strip()
@@ -334,44 +347,198 @@ def status_data():
     return result
 
 
+def tailscale_auth(request):
+    """Chiede al programma root di fare login/logout/connect. Risposta ripulita: mai testo non controllato."""
+    try:
+        proc = run(['/usr/bin/sudo', '-n', AUTH_HELPER], timeout=85, input_text=json.dumps(request))
+    except subprocess.TimeoutExpired:
+        return {'ok':False, 'error':'Tailscale non ha risposto in tempo: controlla lo stato e riprova.'}
+    except OSError as exc:
+        return {'ok':False, 'error':'Programma di accesso non disponibile: %s' % str(exc)[:120]}
+    reply = read_json_from_string(proc.stdout)
+    if proc.returncode == 0 and reply.get('ok') is True:
+        out = {'ok':True}
+        if reply.get('connected') is True:
+            out['connected'] = True
+        url = reply.get('auth_url')
+        if isinstance(url, str) and AUTH_URL_RE.fullmatch(url):
+            out['auth_url'] = url
+        return out
+    error = reply.get('error')
+    if not isinstance(error, str) or not error.strip():
+        error = 'Operazione non riuscita: programma di accesso non installato o non autorizzato (rilancia install_tailscale_panel.sh).'
+    return {'ok':False, 'error':error.strip()[:300]}
+
+
 STYLE = '''
-:root{color-scheme:dark;font:15px system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#0b1020;color:#e7edff}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 5% 0%,#142846 0,transparent 45%),#0b1020;min-height:100vh}
-main{max-width:1050px;margin:0 auto;padding:40px 22px 65px}
-.head{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:28px}
-.logo{display:flex;align-items:center;gap:13px}.emblem{background:linear-gradient(135deg,#24c4b3,#4378e9);padding:12px;border-radius:15px;font-weight:800;color:#06131a}
-h1{font-size:26px;margin:0;letter-spacing:-.6px}.uiversion{font-size:12px;color:#7adacb;margin-top:4px;font-weight:600}small,.muted{color:#94a6c2}button,input{font:inherit}
-.shell{display:grid;grid-template-columns:repeat(3,1fr);gap:15px;margin:22px 0}.card{background:#141d30;border:1px solid #263551;border-radius:18px;padding:22px;box-shadow:0 10px 35px #0002}
-.card .meta{font-size:12px;letter-spacing:.09em;color:#93a6c4;text-transform:uppercase}.big{font-size:20px;font-weight:750;margin:10px 0;overflow-wrap:anywhere}
-.dot{display:inline-block;height:9px;width:9px;border-radius:50%;background:#efab58;margin-right:8px}.dot.good{background:#34d7a1}
-.columns{display:grid;grid-template-columns:1.7fr 1fr;gap:15px}.subhead{font-size:19px;font-weight:760;margin:0 0 7px}p{color:#a7b6d1;line-height:1.6}
-.field{margin:20px 0}.field label{display:block;margin-bottom:8px;font-weight:650}input[type=text],input[type=password],input[type=number],select{width:100%;padding:13px;border:1px solid #3a4b69;background:#0d1627;color:#eaf2ff;border-radius:11px;outline:none}input:focus,select:focus{border-color:#62badf}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.formgrid .field{margin:8px 0}.hidden{display:none!important}.networkcard{margin-top:16px}.netmessage{font-size:14px;line-height:1.5}.buttonrow{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}.radioopts{display:flex;gap:22px;flex-wrap:wrap;padding:14px 0}.radioopts label{cursor:pointer}.dangerlabel{color:#ffc084}
-.tgl{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 0;border-bottom:1px solid #293650}.tgl:last-of-type{border-bottom:0}
-.tgl strong{display:block;margin-bottom:3px}.tgl span{color:#9eafc9;font-size:13px}.switch{appearance:none;width:47px;height:27px;border-radius:20px;background:#45516a;position:relative;cursor:pointer;flex-shrink:0;transition:.2s}.switch:before{content:'';position:absolute;top:4px;left:4px;width:19px;height:19px;border-radius:50%;background:#fff;transition:.2s}.switch:checked{background:#25b8a9}.switch:checked:before{left:24px}
-.action{background:linear-gradient(120deg,#21bda8,#3289dd);border:none;padding:12px 19px;border-radius:11px;color:#061d2c;font-weight:800;cursor:pointer}
-.action:disabled{opacity:.5;cursor:wait}.quiet{background:transparent;border:1px solid #395072;color:#bdd3ef;padding:10px 14px;border-radius:10px;cursor:pointer}
-.footer{display:flex;align-items:center;gap:15px;margin-top:20px;flex-wrap:wrap}#message{font-weight:600}.ok{color:#41dbb4}.err{color:#ff9ba1}
-.discoverycard{margin-top:16px}.devlist{margin-top:14px;display:grid;gap:8px}.device{display:flex;gap:12px;align-items:flex-start;padding:13px;border:1px solid #293b58;border-radius:12px;background:#101b2d}.device input{margin-top:5px;accent-color:#28c4ac}.deviceinfo{min-width:0}.deviceinfo strong{display:block}.deviceinfo small{display:block;margin-top:3px;overflow-wrap:anywhere}.scanmeta{margin-top:10px;color:#9eafc9;font-size:13px}.securitycard{margin-top:16px}.passwordinfo{font-size:13px;color:#9eafc9;margin-top:8px}.notice{padding:13px 16px;border:1px solid #395275;border-radius:11px;background:#13243a;color:#b6d0ee;line-height:1.6;margin-top:15px}.value{font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#dbe8fa;overflow-wrap:anywhere}
-.eventscard{margin-top:16px}.device.alertrow{border-color:#8a5a2c;background:#2a1d10}.device.alertrow strong{color:#ffc084}.evtime{font-variant-numeric:tabular-nums}
-a{color:#7cd6ef}.login{max-width:435px;margin:12vh auto;padding:32px}.login h1{margin:15px 0}ul{padding-left:20px;color:#b4c6dd;line-height:1.9}
-@media(max-width:770px){.formgrid{grid-template-columns:1fr}.shell{grid-template-columns:1fr}.columns{grid-template-columns:1fr}main{padding:24px 15px}h1{font-size:22px}}
+:root{color-scheme:dark;--bg:#090d11;--panel:#10161c;--panel2:#151c23;--edge:#29323b;--edge2:#34404b;--text:#e9eef3;--muted:#94a1ad;--gold:#f5bd12;--gold-hi:#ffd84a;--green:#00e58a;--red:#ff3658;--blue:#5aa9ff;--radius:10px;--focus:0 0 0 2px #090d11,0 0 0 4px #f5bd12}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+[hidden],.hidden{display:none!important}
+body{margin:0;min-height:100vh;background:radial-gradient(ellipse at 0 0,rgba(245,189,18,.07),transparent 42%),radial-gradient(ellipse at 100% 100%,rgba(90,169,255,.045),transparent 40%),var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+:focus-visible{outline:none;box-shadow:var(--focus)}
+button,input,select{font:inherit;color:inherit}
+h1,h2{margin:0}
+.top{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:24px;padding:8px 20px;background:linear-gradient(180deg,#10161c,#0c1116);border-bottom:1px solid var(--edge);box-shadow:0 5px 20px rgba(0,0,0,.22)}
+.brand{display:flex;align-items:center;gap:12px;color:inherit;text-decoration:none;flex-shrink:0}
+.eye{width:46px;height:39px;background:url(data:image/png;base64,__EYE__) center/contain no-repeat;filter:drop-shadow(0 0 8px rgba(245,189,18,.18))}
+.word{display:block;font-size:21px;font-weight:800;letter-spacing:5px;line-height:1;text-transform:uppercase}
+.word b{color:var(--gold)}
+.tag{display:block;margin-top:5px;font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}
+.tabs{display:flex;gap:2px;align-self:stretch;min-width:0;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{display:flex;align-items:center;min-height:48px;padding:0 11px;border-bottom:3px solid transparent;font-size:12.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;color:#a6b0bb;text-decoration:none}
+.tab:hover{color:#f2f5f7;border-bottom-color:var(--edge2)}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.top-right form{margin:0}
+.pill{padding:3px 10px;border:1px solid var(--edge2);border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.4px;color:var(--muted);white-space:nowrap}
+main{max-width:1100px;margin:0 auto;padding:26px 20px 70px}
+section[id]{scroll-margin-top:76px}
+.shell{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:0 0 16px}
+.card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--edge);border-radius:var(--radius);padding:20px 22px;box-shadow:0 8px 28px rgba(0,0,0,.32)}
+.card .meta{font-size:11px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)}
+.big{margin:10px 0 6px;font-size:20px;font-weight:750;overflow-wrap:anywhere}
+small,.muted{color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;margin-right:8px;border-radius:50%;background:var(--gold);box-shadow:0 0 10px rgba(245,189,18,.45)}
+.dot.good{background:var(--green);box-shadow:0 0 10px rgba(0,229,138,.5)}
+.dot.bad{background:var(--red);box-shadow:0 0 10px rgba(255,54,88,.5)}
+.columns{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;margin-top:16px}
+.accountcard,.networkcard,.discoverycard,.securitycard,.eventscard{margin-top:16px}
+.shell+.accountcard{margin-top:0}
+.subhead{position:relative;margin:0 0 8px;padding-left:12px;font-size:18px;font-weight:800;letter-spacing:.2px}
+.subhead:before{content:"";position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:2px;background:var(--gold)}
+p{color:#a9b4bf;line-height:1.6}
+a{color:var(--gold-hi)}
+a:hover{color:#fff0a8}
+.field{margin:18px 0}
+.field label{display:block;margin-bottom:7px;font-size:11px;font-weight:800;letter-spacing:1.1px;text-transform:uppercase;color:#c2ccd6}
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:12px 13px;border:1px solid var(--edge2);border-radius:6px;background:#0b1117;color:var(--text);outline:none}
+input[type=text]::placeholder,input[type=password]::placeholder,input[type=number]::placeholder{color:#66727e}
+input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 2px rgba(245,189,18,.1)}
+input[type=radio],input[type=checkbox]{accent-color:var(--gold)}
+.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.formgrid .field{margin:8px 0}
+.netmessage{font-size:14px;line-height:1.5}
+.buttonrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px}
+.radioopts{display:flex;gap:22px;flex-wrap:wrap;padding:14px 0}
+.radioopts label{cursor:pointer}
+.dangerlabel{color:#ff8da1}
+.tgl{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 0;border-bottom:1px solid var(--edge)}
+.tgl:last-of-type{border-bottom:0}
+.tgl strong{display:block;margin-bottom:3px}
+.tgl span{color:var(--muted);font-size:13px}
+.switch{appearance:none;-webkit-appearance:none;position:relative;flex-shrink:0;width:47px;height:27px;border-radius:20px;background:#3a4650;cursor:pointer;transition:.2s}
+.switch:before{content:'';position:absolute;top:4px;left:4px;width:19px;height:19px;border-radius:50%;background:#fff;transition:.2s}
+.switch:checked{background:var(--gold)}
+.switch:checked:before{left:24px;background:#10141a}
+.action{padding:11px 20px;border:1px solid #ffe25f;border-radius:6px;background:linear-gradient(180deg,#ffd638,#f1bb13);color:#090b0e;font-size:13px;font-weight:900;letter-spacing:.9px;text-transform:uppercase;cursor:pointer;box-shadow:0 8px 22px rgba(240,196,25,.12)}
+.action:hover{filter:brightness(1.06)}
+.action:disabled{opacity:.5;cursor:wait;filter:none}
+.quiet{padding:10px 15px;border:1px solid var(--edge2);border-radius:6px;background:transparent;color:#cbd4dd;font-size:13px;font-weight:700;letter-spacing:.4px;cursor:pointer}
+.quiet:hover{border-color:var(--gold);color:var(--gold-hi)}
+.quiet:disabled{opacity:.5;cursor:wait}
+.danger{padding:10px 15px;border:1px solid rgba(255,54,88,.55);border-radius:6px;background:rgba(255,54,88,.1);color:#ff8da1;font-size:13px;font-weight:800;letter-spacing:.4px;cursor:pointer}
+.danger:hover{background:rgba(255,54,88,.2)}
+.footer{display:flex;align-items:center;gap:15px;margin-top:20px;flex-wrap:wrap}
+#message{font-weight:600}
+.ok{color:var(--green)}
+.err{color:#ff8da1}
+.devlist{margin-top:14px;display:grid;gap:8px}
+.device{display:flex;gap:12px;align-items:flex-start;padding:13px;border:1px solid var(--edge);border-radius:8px;background:#0e141a}
+.device:hover{border-color:var(--edge2)}
+.device input{margin-top:5px}
+.deviceinfo{min-width:0}
+.deviceinfo strong{display:block}
+.deviceinfo small{display:block;margin-top:3px;overflow-wrap:anywhere}
+.scanmeta{margin-top:10px;color:var(--muted);font-size:13px}
+.passwordinfo{margin-top:8px;font-size:13px;color:var(--muted)}
+.notice{margin-top:15px;padding:13px 16px;border:1px solid rgba(245,189,18,.28);border-left:3px solid var(--gold);border-radius:8px;background:rgba(245,189,18,.05);color:#d4d9bd;line-height:1.6}
+.notice.warnnotice{border-color:rgba(255,54,88,.4);border-left-color:var(--red);background:rgba(255,54,88,.06);color:#f1c9d0}
+.value{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;color:#dbe6f0;overflow-wrap:anywhere}
+.device.alertrow{border-color:rgba(255,54,88,.45);background:rgba(255,54,88,.07)}
+.device.alertrow strong{color:#ff8da1}
+.evtime{font-variant-numeric:tabular-nums}
+.authlink{display:block;margin:8px 0;padding:10px 12px;border:1px dashed var(--edge2);border-radius:6px;background:#0b1117;overflow-wrap:anywhere}
+ul{padding-left:20px;color:#b4c0cc;line-height:1.9}
+.authwrap{min-height:100vh;max-width:none;display:flex;align-items:center;justify-content:center;padding:18px}
+.auth{position:relative;width:min(470px,100%);padding:20px 32px 24px;border:1px solid rgba(240,196,25,.72);border-radius:7px;background:linear-gradient(155deg,rgba(13,20,27,.985),rgba(5,10,15,.97));box-shadow:0 26px 78px rgba(0,0,0,.64),0 0 30px rgba(240,196,25,.07);clip-path:polygon(14px 0,calc(100% - 20px) 0,100% 18px,100% calc(100% - 14px),calc(100% - 16px) 100%,0 100%,0 14px)}
+.auth:before{content:"";position:absolute;left:22px;right:22px;top:0;height:1px;background:linear-gradient(90deg,transparent,#f0c419 35%,#ffe36a 50%,#f0c419 65%,transparent);opacity:.68;box-shadow:0 0 16px rgba(240,196,25,.4)}
+.auth .eye{width:92px;height:79px;margin:0 auto 4px}
+.authbrand{text-align:center;font-size:30px;font-weight:800;letter-spacing:8px;text-transform:uppercase}
+.authbrand b{color:var(--gold)}
+.authsub{margin:16px 0 0;text-align:center;font-size:14px;font-weight:700;letter-spacing:5px;text-transform:uppercase;color:#edf2f6}
+.authsub b{color:#f0c419}
+.authtag{margin-top:7px;text-align:center;font-size:8px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#a5afb9}
+.authrule{position:relative;width:68%;height:1px;margin:14px auto 18px;background:linear-gradient(90deg,transparent,#59616a 24%,#59616a 76%,transparent)}
+.authrule:after{content:"";position:absolute;left:50%;top:-1px;width:38px;height:3px;transform:translateX(-50%);border-radius:3px;background:#f0c419;box-shadow:0 0 14px rgba(240,196,25,.35)}
+.authform{display:flex;flex-direction:column;gap:12px}
+.authform label{display:flex;flex-direction:column;gap:6px;font-size:10px;font-weight:900;letter-spacing:1.7px;color:#e5eaf0}
+.authform input{height:44px;padding:0 14px;border:1px solid #536170;border-radius:6px;background:rgba(5,11,16,.84);color:#f2f5f7;font-size:15px}
+.authform input:focus{border-color:#f0c419;box-shadow:0 0 0 2px rgba(240,196,25,.1),0 0 24px rgba(240,196,25,.07)}
+.authform button{height:50px;margin-top:4px;border:1px solid #ffe25f;border-radius:4px;background:linear-gradient(180deg,#ffd638,#f1bb13);color:#090b0e;font-size:15px;font-weight:900;letter-spacing:1.4px;cursor:pointer;box-shadow:0 10px 28px rgba(240,196,25,.16),0 0 0 1px rgba(255,255,255,.18) inset;clip-path:polygon(9px 0,calc(100% - 9px) 0,100% 9px,100% calc(100% - 9px),calc(100% - 9px) 100%,9px 100%,0 calc(100% - 9px),0 9px)}
+.authform button:after{content:"  →"}
+.authform button:hover{filter:brightness(1.06)}
+.authmsg{margin:14px 0 0;padding:8px 10px;border:1px solid #8e3636;border-radius:6px;background:rgba(58,23,23,.92);color:#ff9898;font-size:12px;font-weight:800}
+.authfoot{margin-top:16px;text-align:center;font-size:9px;letter-spacing:1.7px;text-transform:uppercase;color:#6d7781}
+.authfoot:before{content:"◆";margin-right:9px;color:#f0c419}
+@media(max-width:900px){.top{position:static;gap:14px;padding:8px 12px;flex-wrap:wrap}.tabs{order:3;flex-basis:100%}.tab{min-height:40px}}
+@media(max-width:480px){.pill{display:none}}
+@media(max-width:770px){.formgrid{grid-template-columns:1fr}.shell{grid-template-columns:1fr}.columns{grid-template-columns:1fr}main{padding:18px 14px 60px}.word{font-size:18px;letter-spacing:4px}.authwrap .auth{padding:16px 18px 20px}.authform input{font-size:16px}}
 '''
 
 
 def page(body, extra=''):
-    return ('''<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Tailscale Control Panel</title><style>''' + STYLE + '''</style></head><body>''' + body + extra + '</body></html>')
+    icon = 'data:image/png;base64,' + EYE_B64
+    return ('<!doctype html><html lang="it"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta name="theme-color" content="#090d11"><meta name="color-scheme" content="dark">'
+            '<title>Raptor VPN</title><link rel="icon" type="image/png" href="' + icon + '">'
+            '<style>' + STYLE.replace('__EYE__', EYE_B64) + '</style></head><body>' + body + extra + '</body></html>')
 
 
-LOGIN = '''<main><section class="card login"><div class="emblem" style="display:inline-block">TS</div>
-<h1>Orange Pi · Tailscale</h1><p>Accedi al pannello di amministrazione della rete.</p>
-<form method="post" action="/login"><div class="field"><label for="password">Password amministratore</label>
-<input id="password" name="password" type="password" autocomplete="current-password" required autofocus></div>
-<button class="action" type="submit">Accedi al pannello</button></form><p style="font-size:12px">Connessione HTTPS locale protetta.</p></section></main>'''
+LOGIN = '''<main class="authwrap"><section class="auth"><div class="eye" role="img" aria-label="Raptor"></div>
+<div class="authbrand">Raptor <b>VPN</b></div>
+<h1 class="authsub">Accesso <b>protetto</b></h1><div class="authtag">Gestione Tailscale · Orange Pi Zero</div><div class="authrule"></div>
+__MSG__<form method="post" action="/login" class="authform"><label for="password">PASSWORD<input id="password" name="password" type="password" autocomplete="current-password" required autofocus></label>
+<button type="submit">ACCEDI</button></form>
+<div class="authfoot">Connessione HTTPS locale protetta</div></section></main>'''
 
-DASH = '''<main><header class="head"><div class="logo"><div class="emblem">TS</div><div><h1>Tailscale Control Panel</h1><small>Orange Pi Zero · Subnet Router</small><div class="uiversion">Web User Interface v1.5.0</div></div></div><form method="post" action="/logout"><input type="hidden" name="csrf" value="__CSRF__"><button class="quiet">Esci</button></form></header>
+
+def login_page(message=''):
+    """Pagina di accesso; il messaggio (testo fisso, mai dati dell'utente) compare dentro la scheda."""
+    box = '<div class="authmsg" role="alert">%s</div>' % message if message else ''
+    return page(LOGIN.replace('__MSG__', box))
+
+
+DASH = '''<header class="top"><a class="brand" href="#top"><span class="eye" role="img" aria-label="Raptor"></span><span><span class="word">Raptor <b>VPN</b></span><span class="tag">Tailscale · Orange Pi Zero</span></span></a>
+<nav class="tabs" aria-label="Sezioni"><a class="tab" href="#account">Account</a><a class="tab" href="#routes">Rotte</a><a class="tab" href="#lanDiscovery">Dispositivi</a><a class="tab" href="#ethernet">Ethernet</a><a class="tab" href="#events">Eventi</a><a class="tab" href="#security">Sicurezza</a></nav>
+<div class="top-right"><span class="pill">Web UI v1.6.0</span><form method="post" action="/logout"><input type="hidden" name="csrf" value="__CSRF__"><button class="quiet">Esci</button></form></div></header>
+<main id="top">
 <div class="shell"><div class="card"><div class="meta">Connessione Tailscale</div><div class="big" id="backend">Verifica...</div><small id="tailnet">-</small></div><div class="card"><div class="meta">Indirizzo Tailscale</div><div class="big value" id="tsip">-</div><small id="hostname">-</small></div><div class="card"><div class="meta">Rete locale</div><div class="big value" id="lanip">-</div><small id="interface">-</small></div></div>
-<div class="columns"><section class="card"><h2 class="subhead">Configurazione di rete</h2><p>Configura le rotte pubblicate su Tailscale. La configurazione dell’indirizzo Ethernet (DHCP o IP statico) è gestita nella sezione dedicata qui sotto.</p>
+<section class="card accountcard" id="account"><h2 class="subhead">Account Tailscale</h2>
+<div id="accNote" class="netmessage" role="status"></div>
+<div id="accDown" class="notice warnnotice" hidden><strong>Tailscale non risponde.</strong> Il servizio potrebbe essere fermo o in avvio: attendi qualche secondo e premi “Aggiorna stato”. <span id="accDownWhy"></span></div>
+<div id="accConnected" hidden>
+<p>La scheda è collegata alla rete Tailscale <strong id="accTailnet">-</strong> con il nome <strong id="accHost">-</strong>.</p>
+<p id="accTagsRow" hidden><strong>Tag:</strong> <span class="value" id="accTags">-</span></p>
+<div class="buttonrow"><button class="danger" id="accLogout" type="button">Scollega da Tailscale</button></div>
+<div id="accLogoutBox" class="notice warnnotice" hidden><strong>Scollegare questa scheda dall’account?</strong> Le rotte pubblicate smettono di funzionare e la scheda non sarà più raggiungibile da remoto finché non la ricolleghi da qui (serve di nuovo un link o una chiave).
+<div class="buttonrow"><button class="danger" id="accLogoutYes" type="button">Sì, scollega</button><button class="quiet" id="accLogoutNo" type="button">Annulla</button></div></div></div>
+<div id="accStopped" hidden><p>La scheda è autenticata ma Tailscale è <strong>fermo</strong> (disattivato).</p><div class="buttonrow"><button class="action" id="accConnect" type="button">Riattiva Tailscale</button></div></div>
+<div id="accWait" class="notice" hidden>La scheda ha chiesto l’accesso e attende l’<strong>approvazione</strong> nella console di Tailscale (<a href="https://login.tailscale.com/admin/machines" target="_blank" rel="noopener noreferrer">Admin → Machines</a>). Questa pagina si aggiorna da sola.</div>
+<div id="accLogin" hidden>
+<p>La scheda non è ancora collegata a un account Tailscale. Scegli come collegarla: tutto si fa da qui, senza SSH.</p>
+<div class="radioopts"><label><input type="radio" name="accMode" id="accModeUrl" value="url" checked> Accedi con link</label><label><input type="radio" name="accMode" id="accModeKey" value="key"> Accedi con chiave e tag</label></div>
+<form id="accForm" autocomplete="off"><div class="formgrid"><div class="field"><label for="accName">Nome della scheda (facoltativo)</label><input id="accName" type="text" placeholder="raptor-cliente" spellcheck="false" maxlength="63" autocomplete="off"></div></div>
+<div id="accKeyFields" class="hidden"><div class="formgrid"><div class="field"><label for="accKey">Chiave di autenticazione</label><input id="accKey" type="password" placeholder="tskey-auth-..." autocomplete="off" spellcheck="false" maxlength="220"></div>
+<div class="field"><label for="accTagsIn">Tag (facoltativi, separati da virgola)</label><input id="accTagsIn" type="text" placeholder="tag:cliente" spellcheck="false" autocomplete="off"></div></div>
+<p class="passwordinfo">Crea la chiave in <a href="https://login.tailscale.com/admin/settings/keys" target="_blank" rel="noopener noreferrer">Tailscale Admin → Settings → Keys</a>. Per usare dei tag, la chiave deve essere creata con gli stessi tag e quei tag devono esistere nella policy (tagOwners). La chiave non viene salvata sulla scheda.</p></div>
+<div class="buttonrow"><button class="action" id="accGo" type="submit">Ottieni il link di accesso</button><span id="accMsg" class="netmessage" role="status"></span></div></form>
+<div id="accLink" class="notice" hidden><strong>Apri questo link</strong> con un browser (anche dal telefono), accedi al tuo account Tailscale e approva la scheda. Questa pagina si aggiorna da sola.
+<a class="authlink value" id="accLinkA" target="_blank" rel="noopener noreferrer" href="#"></a><div class="buttonrow"><button class="quiet" id="accCopy" type="button">Copia link</button></div></div>
+</div></section>
+<div class="columns"><section class="card" id="routes"><h2 class="subhead">Configurazione di rete</h2><p>Configura le rotte pubblicate su Tailscale. La configurazione dell’indirizzo Ethernet (DHCP o IP statico) è gestita nella sezione dedicata qui sotto.</p>
 <form id="settings"><strong>Modalità di pubblicazione</strong>
 <div class="radioopts"><label><input name="routeMode" type="radio" id="routeOff" value="off" checked> Nessuna LAN</label>
 <label><input name="routeMode" type="radio" id="routeAll" value="all"> Intera subnet</label>
@@ -445,7 +612,7 @@ async function refresh(){
  try {
   const response=await fetch('/api/status',{cache:'no-store'}); if(!response.ok)throw Error('Sessione scaduta: ricarica la pagina');
   const data=await response.json(); const s=data.settings;
-  $('backend').innerHTML='<span class="dot '+(data.backend==='Running'?'good':'')+'"></span>'+escapeHtml(data.backend);
+  renderAccount(data);
   $('tailnet').textContent=data.tailnet;
   $('tsip').textContent=data.tailscale_ip; $('hostname').textContent=data.hostname;
   $('lanip').textContent=data.lan.ip; $('interface').textContent=data.lan.device;
@@ -588,6 +755,78 @@ $('passwordForm').addEventListener('submit',async e=>{
  finally{$('changePassword').disabled=false;}
 });
 setInterval(()=>{if(pendingId){refresh();}},6000);
+const BACKEND_LABELS={Running:'Collegato',NeedsLogin:'Accesso richiesto',NeedsMachineAuth:'In attesa di approvazione',Stopped:'Fermo',Starting:'Avvio in corso',NoState:'Avvio in corso'};
+let accWaiting=false;
+function safeAuthUrl(u){try{const x=new URL(u);return x.protocol==='https:'&&/(^|[.])tailscale[.]com$/.test(x.hostname)&&x.pathname.startsWith('/a/')&&!x.username&&!x.password&&!x.port;}catch(e){return false;}}
+function accNote(t,error){$('accNote').textContent=t;$('accNote').className='netmessage '+(error?'err':'ok');}
+function accMsg(t,error){$('accMsg').textContent=t;$('accMsg').className='netmessage '+(error?'err':'ok');}
+async function postJson(url,body){
+ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body)});
+ let d={};try{d=await r.json();}catch(e){}
+ if(!r.ok||d.ok===false)throw Error(d.error||'Operazione non riuscita.');
+ return d;
+}
+function showLink(url){
+ const ok=safeAuthUrl(url);$('accLink').hidden=!ok;
+ if(ok){$('accLinkA').href=url;$('accLinkA').textContent=url;}
+ return ok;
+}
+function renderAccount(d){
+ const st=d.backend,down=st==='Non disponibile',connected=st==='Running',stopped=st==='Stopped';
+ const needsLogin=st==='NeedsLogin'||st==='NoState'||st==='Starting';
+ $('accDown').hidden=!down;$('accDownWhy').textContent=down&&d.error?d.error:'';
+ $('accConnected').hidden=!connected;$('accStopped').hidden=!stopped;
+ $('accWait').hidden=st!=='NeedsMachineAuth';$('accLogin').hidden=!needsLogin;
+ if(connected){
+  $('accTailnet').textContent=d.tailnet;$('accHost').textContent=d.hostname;
+  const tags=Array.isArray(d.tags)?d.tags:[];$('accTagsRow').hidden=!tags.length;$('accTags').textContent=tags.join(', ');
+ }
+ const pending=needsLogin&&showLink(d.auth_url);
+ if(!pending&&!needsLogin)$('accLink').hidden=true;
+ accWaiting=pending||st==='NeedsMachineAuth'||st==='Starting';
+ $('backend').innerHTML='<span class="dot '+(connected?'good':(down?'bad':''))+'"></span>'+escapeHtml(BACKEND_LABELS[st]||st);
+}
+for(const id of ['accModeUrl','accModeKey'])$(id).addEventListener('change',()=>{
+ const key=$('accModeKey').checked;$('accKeyFields').classList.toggle('hidden',!key);
+ $('accGo').textContent=key?'Collega con la chiave':'Ottieni il link di accesso';accMsg('',false);
+});
+$('accForm').addEventListener('submit',async e=>{
+ e.preventDefault();const key=$('accModeKey').checked;
+ const body={mode:key?'key':'url',hostname:$('accName').value.trim()};
+ if(key){
+  body.key=$('accKey').value.trim();body.tags=$('accTagsIn').value.split(',').map(x=>x.trim()).filter(Boolean);
+  if(!body.key){accMsg('Inserisci la chiave di autenticazione.',true);return;}
+ }
+ $('accGo').disabled=true;accMsg(key?'Collegamento in corso: può richiedere fino a un minuto...':'Richiesta del link in corso...',false);
+ try{
+  const r=await postJson('/api/tailscale/login',body);
+  if(r.auth_url){showLink(r.auth_url);accMsg('Link pronto: aprilo per completare l’accesso.',false);accWaiting=true;}
+  else{accMsg('Scheda collegata a Tailscale.',false);}
+  if(key)$('accKey').value='';
+  await refresh();
+ }catch(error){accMsg(error.message,true);}
+ finally{$('accGo').disabled=false;}
+});
+$('accCopy').addEventListener('click',async()=>{
+ try{await navigator.clipboard.writeText($('accLinkA').textContent);$('accCopy').textContent='Copiato';}
+ catch(e){$('accCopy').textContent='Seleziona e copia a mano';}
+ setTimeout(()=>{$('accCopy').textContent='Copia link';},2500);
+});
+$('accLogout').addEventListener('click',()=>{$('accLogoutBox').hidden=false;$('accLogout').hidden=true;});
+$('accLogoutNo').addEventListener('click',()=>{$('accLogoutBox').hidden=true;$('accLogout').hidden=false;});
+$('accLogoutYes').addEventListener('click',async()=>{
+ $('accLogoutYes').disabled=true;
+ try{await postJson('/api/tailscale/logout',{});$('accLogoutBox').hidden=true;$('accLogout').hidden=false;await refresh();}
+ catch(error){accNote(error.message,true);}
+ finally{$('accLogoutYes').disabled=false;}
+});
+$('accConnect').addEventListener('click',async()=>{
+ $('accConnect').disabled=true;
+ try{const r=await postJson('/api/tailscale/connect',{});if(r.auth_url)showLink(r.auth_url);await refresh();}
+ catch(error){accNote(error.message,true);}
+ finally{$('accConnect').disabled=false;}
+});
+setInterval(()=>{if(accWaiting)refresh();},4000);
 const EVENT_LABELS={boot:'Avvio',shutdown:'Spegnimento',unclean_shutdown:'Spegnimento anomalo (corrente mancata o blocco)',clock_synced:'Orologio sincronizzato'};
 const PREV_LABELS={first_boot:'primo avvio registrato',clean_reboot:'dopo un riavvio regolare',clean_poweroff:'dopo uno spegnimento regolare',clean_halt:'dopo un arresto regolare',clean_unknown:'dopo uno spegnimento regolare',unclean:'dopo uno spegnimento anomalo',unknown:'stato precedente non leggibile'};
 const KIND_LABELS={reboot:'riavvio',poweroff:'spegnimento',halt:'arresto',unknown:'tipo non rilevato'};
@@ -698,7 +937,7 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'TailscalePanel/1.5.0'
+    server_version = 'RaptorVPNPanel/1.6.0'
     sys_version = ''
 
     def setup(self):
@@ -719,7 +958,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('X-Frame-Options', 'DENY')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         for k,v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -757,7 +996,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == '/login':
-            return self._send(200, page(LOGIN))
+            return self._send(200, login_page())
         if path == '/':
             session = self._session()
             if not session:
@@ -784,7 +1023,7 @@ class Handler(BaseHTTPRequestHandler):
                     limited = (len(FAILURES.get(client_ip, [])) >= LOGIN_FAILURES_PER_IP or
                                sum(len(v) for v in FAILURES.values()) >= LOGIN_FAILURES_GLOBAL)
                 if limited:
-                    return self._send(429, page(LOGIN + '<p>Troppi tentativi. Riprova più tardi.</p>'))
+                    return self._send(429, login_page('Troppi tentativi. Riprova più tardi.'))
                 form = parse_qs(body.decode('utf-8'))
                 password = (form.get('password') or [''])[0]
                 # PBKDF2 (220.000 iterazioni) e' lento su Cortex-A7: va eseguito FUORI dal
@@ -806,7 +1045,7 @@ class Handler(BaseHTTPRequestHandler):
                 if authenticated:
                     cookie = 'tspanel=%s; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Strict' % token
                     return self._send(303, b'', headers={'Location':'/', 'Set-Cookie':cookie})
-                return self._send(401, page(LOGIN + '<p class="err">Password non valida.</p>'))
+                return self._send(401, login_page('Password non valida.'))
             session = self._session()
             if not session:
                 return self._json(401, {'error':'Sessione scaduta. Eseguire il login.'})
@@ -886,6 +1125,30 @@ class Handler(BaseHTTPRequestHandler):
                 if proc.returncode or not result.get('ok'):
                     return self._json(400, {'error':str(result.get('error') or proc.stderr.strip() or 'Errore rete')[:500]})
                 return self._json(200,result)
+            if path in ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect'):
+                if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                    return self._json(415, {'error':'Content-Type non supportato'})
+                if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
+                    return self._json(403, {'error':'CSRF non valido'})
+                payload = json.loads(body.decode('utf-8'))
+                if not isinstance(payload, dict):
+                    raise ValueError('JSON non valido')
+                if path == '/api/tailscale/login':
+                    mode = payload.get('mode')
+                    if mode not in ('url', 'key') or not set(payload) <= {'mode', 'hostname', 'key', 'tags'}:
+                        raise ValueError('Richiesta di accesso non valida.')
+                    request = {'action':'login_' + mode, 'hostname':payload.get('hostname', '')}
+                    if mode == 'key':
+                        request['key'] = payload.get('key')
+                        request['tags'] = payload.get('tags', [])
+                    elif set(payload) - {'mode', 'hostname'}:
+                        raise ValueError('Richiesta di accesso non valida.')
+                else:
+                    if payload:
+                        raise ValueError('Richiesta non valida.')
+                    request = {'action':path.rsplit('/', 1)[1]}
+                result = tailscale_auth(request)
+                return self._json(200 if result['ok'] else 400, result)
             if path == '/api/scan':
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
                     return self._json(415, {'error':'Content-Type non supportato'})

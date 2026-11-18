@@ -5,6 +5,6 @@ Installazione da Armbian pulito:
   cd /root/tspanel-factory-r1.3.2
   python3 -m zipfile -e /root/TAILSCALE_PANEL_FACTORY_R1_3_2.zip .
   sh ./install_factory.sh
-Poi: tailscale up
+Poi: collega Tailscale dal pannello (sezione Account Tailscale, vedi ACCOUNT_TAILSCALE.md) oppure con: tailscale up
 Prima configurazione: policy OFF, lista host vuota, nessuna rotta pubblicata.
 NON usare questo install_factory.sh per aggiornare una Orange Pi gia' configurata.

@@ -10,9 +10,11 @@ install -d -m 0700 "$DIR"
 cat > "$DIR/paths.txt" <<'EOF'
 opt/tailscale-panel/tailscale_panel.py
 opt/tailscale-panel/password_policy.py
+opt/tailscale-panel/panel_assets.py
 usr/local/libexec/tailscale-panel-helper
 usr/local/libexec/tailscale-panel-net-helper
 usr/local/libexec/tailscale-panel-discovery
+usr/local/libexec/tailscale-panel-auth
 etc/systemd/system/tailscale-panel.service
 etc/systemd/system/tailscale-panel.socket
 etc/systemd/system/tailscale-panel-net-recovery.service

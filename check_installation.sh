@@ -54,6 +54,13 @@ if [ -s /etc/tailscale-panel/auth.json ] && \
 else
   line 'Password Web UI' 'ERRORE: credenziali assenti o permessi da correggere'; ok=0
 fi
+if [ -x /usr/local/libexec/tailscale-panel-auth ] && [ -s /opt/tailscale-panel/panel_assets.py ] && \
+   grep -Fq '/usr/local/libexec/tailscale-panel-auth ""' /etc/sudoers.d/tailscale-panel 2>/dev/null && \
+   [ "$(printf '{"action":"nonsense"}' | timeout 12 runuser -u tspanel -- sudo -n /usr/local/libexec/tailscale-panel-auth 2>/dev/null | grep -c '"ok": false' || true)" = 1 ]; then
+  line 'Accesso Tailscale dal pannello' 'OK (programma root autorizzato, risposta di prova corretta)'
+else
+  line 'Accesso Tailscale dal pannello' 'ERRORE: programma o regola sudoers mancanti (rilanciare install_tailscale_panel.sh)'; ok=0
+fi
 if [ -f /etc/tailscale-panel-lan.conf ] && [ ! -L /etc/tailscale-panel-lan.conf ] && \
    [ "$(stat -c '%U:%G' /etc/tailscale-panel-lan.conf 2>/dev/null)" = root:root ] && \
    grep -Fq "INTERFACE_FILE = '/etc/tailscale-panel-lan.conf'" /usr/local/libexec/tailscale-panel-discovery 2>/dev/null && \

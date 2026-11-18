@@ -124,7 +124,7 @@ class DiscoveryTests(unittest.TestCase):
 
 class AppTests(unittest.TestCase):
     def test_version_and_routes_visible(self):
-        self.assertIn('Web User Interface v1.5.0',p.DASH)
+        self.assertIn('Web UI v1.6.0',p.DASH)
         self.assertIn('LAN Device Discovery',p.DASH)
         self.assertIn("'/api/scan'",DIR.joinpath('tailscale_panel.py').read_text())
         self.assertIn("routeSelected",p.DASH)

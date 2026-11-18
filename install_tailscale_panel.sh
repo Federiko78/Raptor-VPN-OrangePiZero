@@ -14,6 +14,7 @@ DATA=/var/lib/tailscale-panel
 HELPER=/usr/local/libexec/tailscale-panel-helper
 NET_HELPER=/usr/local/libexec/tailscale-panel-net-helper
 DISCOVERY_HELPER=/usr/local/libexec/tailscale-panel-discovery
+AUTH_HELPER=/usr/local/libexec/tailscale-panel-auth
 PORT=${PORT:-8443}
 case "$PORT" in
   ''|*[!0-9]*) echo "PORT deve essere un numero" >&2; exit 1;;
@@ -21,7 +22,7 @@ esac
 if [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
   echo "Scegliere una porta TCP fra 1024 e 65535" >&2; exit 1
 fi
-for src in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py password_policy.py; do
+for src in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py; do
   if [ ! -r "$DIR/$src" ]; then
     echo "Manca il file $DIR/$src: trasferire tutti i file nella stessa cartella." >&2
     exit 1
@@ -31,7 +32,7 @@ if ! command -v systemctl >/dev/null 2>&1; then
   echo "ERRORE: questo installer richiede Debian con systemd." >&2; exit 1
 fi
 
-printf '\n== ORANGE PI ZERO / FACTORY R1.3.2 - WEB UI 1.5.0 ==\n'
+printf '\n== ORANGE PI ZERO / FACTORY R1.3.2 - WEB UI 1.6.0 ==\n'
 printf 'Kernel: '; uname -r
 printf 'Architettura: '; uname -m
 if [ -r /etc/os-release ]; then . /etc/os-release; echo "Sistema: ${PRETTY_NAME:-Linux}"; fi
@@ -101,13 +102,15 @@ if [ -r "$APP/tailscale_panel.py" ]; then
 fi
 install -m 644 -o root -g root "$DIR/tailscale_panel.py" "$APP/tailscale_panel.py"
 install -m 644 -o root -g root "$DIR/password_policy.py" "$APP/password_policy.py"
+install -m 644 -o root -g root "$DIR/panel_assets.py" "$APP/panel_assets.py"
 install -m 755 -o root -g root "$DIR/tailscale_panel_helper.py" "$HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_network.py" "$NET_HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_discovery.py" "$DISCOVERY_HELPER"
+install -m 755 -o root -g root "$DIR/tailscale_panel_auth.py" "$AUTH_HELPER"
 
 # Exact command permitted; no arbitrary root commands or arguments.
 cat > /etc/sudoers.d/tailscale-panel <<'EOF'
-tspanel ALL=(root) NOPASSWD: /usr/local/libexec/tailscale-panel-helper "", /usr/local/libexec/tailscale-panel-net-helper "", /usr/local/libexec/tailscale-panel-discovery ""
+tspanel ALL=(root) NOPASSWD: /usr/local/libexec/tailscale-panel-helper "", /usr/local/libexec/tailscale-panel-net-helper "", /usr/local/libexec/tailscale-panel-discovery "", /usr/local/libexec/tailscale-panel-auth ""
 EOF
 chmod 0440 /etc/sudoers.d/tailscale-panel
 if ! visudo -cf /etc/sudoers.d/tailscale-panel >/dev/null; then
@@ -209,7 +212,7 @@ net.ipv4.ip_forward = 1
 EOF
 sysctl -p /etc/sysctl.d/99-tailscale-panel.conf
 
-# Backup working systemd units before migrating to v1.5.0.
+# Backup working systemd units before migrating to v1.6.0.
 for unit in tailscale-panel.service tailscale-panel.socket tailscale-panel-route-guard.service; do
   path="/etc/systemd/system/$unit"
   if [ -f "$path" ]; then
@@ -224,7 +227,7 @@ systemctl disable tailscale-panel.service 2>/dev/null || true
 # Interface-level binding survives any DHCP IP change (SO_BINDTODEVICE).
 cat > /etc/systemd/system/tailscale-panel.socket <<EOF
 [Unit]
-Description=Tailscale Panel v1.5.0 HTTPS socket on $LAN_DEV (DHCP-independent)
+Description=Tailscale Panel v1.6.0 HTTPS socket on $LAN_DEV (DHCP-independent)
 
 [Socket]
 ListenStream=0.0.0.0:$PORT
@@ -238,7 +241,7 @@ EOF
 
 cat > /etc/systemd/system/tailscale-panel.service <<EOF
 [Unit]
-Description=Tailscale Control Panel v1.5.0 HTTPS / Orange Pi Zero
+Description=Tailscale Control Panel v1.6.0 HTTPS / Orange Pi Zero
 Requires=tailscale-panel.socket tailscaled.service
 After=tailscale-panel.socket network.target tailscaled.service
 
@@ -367,7 +370,7 @@ fi
 
 echo
 echo '=========================================================='
-echo ' INSTALLAZIONE FACTORY v1.5.0 COMPLETATA'
+echo ' INSTALLAZIONE FACTORY v1.6.0 COMPLETATA'
 echo '=========================================================='
 echo "Dashboard : https://$DNS_NAME:$PORT (se mDNS disponibile)"
 echo "IP DHCP   : https://${LAN_IP:-IP-ASSEGNATO}:$PORT"
@@ -377,7 +380,7 @@ echo 'Accesso   : password amministratore, modificabile da GUI > Sicurezza'
 if [ "$NEW_PASSWORD" = no ]; then
   echo 'Password  : mantenuta la password della precedente installazione'
 fi
-echo 'Tailscale : se non autenticato, eseguire sudo tailscale up'
+echo 'Tailscale : se non collegato, si fa dal pannello (sezione Account Tailscale), senza SSH'
 echo 'Discovery : scanner ARP locale, IP/MAC/hostname, pubblicazione /32'
 echo 'Guard     : forwarding LAN filtrato per host in modalità selettiva'
 echo 'Info      : approvare le rotte su Tailscale Admin > Machines'

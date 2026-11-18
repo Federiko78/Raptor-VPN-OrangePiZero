@@ -16,6 +16,8 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - DHCP o IP statico via Netplan, con **conferma entro 150 s** e rollback automatico.
 - Helper root con schema JSON fisso, nessuna shell; `sudo` limitato a tre comandi senza argomenti.
 - **Wi-Fi "Raptor VPN - <IP>"** per ~3 minuti dopo l'avvio: l'installatore legge l'IP assegnato dal DHCP dal telefono.
+- **Account Tailscale dal pannello**: accesso con link oppure con chiave di autenticazione + tag, scollegamento e riattivazione, senza SSH. Vedi [`ACCOUNT_TAILSCALE.md`](ACCOUNT_TAILSCALE.md).
+- **Grafica Raptor**: stesso stile nero e oro del pannello Raptor AI, con menu, tema scuro e versione per telefono.
 - **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello. Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
 - **IP di recupero** `169.254.X.Y` scelto da te: raggiunge sempre il pannello dalla stessa LAN, anche con Tailscale spento o IP sconosciuto (la password resta obbligatoria). Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
@@ -37,7 +39,7 @@ Da root, in una sessione SSH con terminale, **un solo comando** (installa git e 
 curl -fsSL https://raw.githubusercontent.com/Federiko78/Raptor-VPN-OrangePiZero/main/bootstrap.sh | sh
 ```
 
-L'installer chiede la password del pannello (minimo 12 caratteri), l'**IP di recupero** e se attivare il **Wi-Fi che annuncia l'IP**; alla fine autentica Tailscale con `tailscale up`. Per provare un ramo diverso: `... | RAPTOR_BRANCH=nome-ramo sh`.
+L'installer chiede la password del pannello (minimo 12 caratteri), l'**IP di recupero** e se attivare il **Wi-Fi che annuncia l'IP**; poi Tailscale si collega **dal pannello** (sezione *Account Tailscale*), senza comandi da SSH. Per provare un ramo diverso: `... | RAPTOR_BRANCH=nome-ramo sh`.
 
 Se preferisci passo per passo:
 
@@ -65,6 +67,8 @@ python3 test_security.py     # server HTTPS reale su 127.0.0.1 (serve openssl)
 python3 test_access.py       # IP di recupero
 python3 test_ap.py           # Wi-Fi annuncio-IP
 python3 test_eventlog.py     # registro eventi (scrittore)
+python3 test_tsauth.py       # accesso Tailscale (programma root)
+python3 test_panel_account.py # accesso Tailscale (lato pannello)
 python3 test_panel_events.py # registro eventi (lettura nel pannello)
 sha256sum -c SHA256SUMS      # integrità del pacchetto (usata da install_factory.sh)
 ```

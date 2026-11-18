@@ -71,13 +71,13 @@ Durante l'installazione:
 
 ### Associazione del nuovo Orange Pi
 
-Terminata l'installazione:
+Terminata l'installazione, dalla versione 1.6.0 il collegamento si fa **dal pannello**, sezione *Account Tailscale* (link di accesso oppure chiave + tag: vedi `ACCOUNT_TAILSCALE.md`). Resta valido anche il comando da SSH:
 
 ```bash
 tailscale up
 ```
 
-Aprire il collegamento di autenticazione nel terminale e autorizzare il **nuovo** dispositivo. L'autenticazione non abilita automaticamente l'accesso alla LAN. Verificare l'assenza di rotte:
+Aprire il collegamento di autenticazione e autorizzare il **nuovo** dispositivo. L'autenticazione non abilita automaticamente l'accesso alla LAN. Verificare l'assenza di rotte:
 
 ```bash
 tailscale get advertise-routes
