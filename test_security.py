@@ -335,11 +335,11 @@ class ServerTests(unittest.TestCase):
         with patch.object(p, 'run', crashing), patch.object(p, 'lan_details', return_value={}), patch.object(p, 'saved_state', return_value={}):
             self.assertFalse(p.status_data()['port']['supported'])
 
-    def test_dashboard_contains_the_port_card(self):
+    def test_dashboard_has_the_port_inside_the_ethernet_card(self):
         token, _ = self.session()
         status, _, html = self.request('GET', '/', headers={'Cookie': token})
         self.assertEqual(status, 200)
-        for marker in ('id="panelPort"', 'id="portForm"', 'id="portInput"', 'id="confirmPort"'):
+        for marker in ('id="panelPort"', 'id="portForm"', 'id="portInput"', 'id="confirmPort"', 'id="ethNow"', 'id="ethUrl"'):
             self.assertIn(marker, html)
 
     def test_login_errors_are_shown_inside_the_card_and_csp_allows_only_data_images(self):

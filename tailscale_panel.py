@@ -433,9 +433,14 @@ small,.muted{color:var(--muted)}
 .dot.good{background:var(--green);box-shadow:0 0 10px rgba(0,229,138,.5)}
 .dot.bad{background:var(--red);box-shadow:0 0 10px rgba(255,54,88,.5)}
 .columns{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;margin-top:16px}
-.accountcard,.networkcard,.portcard,.discoverycard,.securitycard,.eventscard{margin-top:16px}
+.accountcard,.networkcard,.discoverycard,.securitycard,.eventscard{margin-top:16px}
 #portInput{max-width:220px}
-.portnow{margin:0 0 12px}
+.ethnow{display:grid;gap:10px;margin:14px 0 6px;padding:14px 16px;border:1px solid var(--edge);border-radius:8px;background:#0b1117}
+.ethrow{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.ethrow .meta{min-width:230px}
+.ethmode{color:var(--muted);font-size:13px}
+#ethUrl{color:var(--gold-hi)}
+.minihead{margin:26px 0 4px;padding-top:18px;border-top:1px solid var(--edge);font-size:15px;font-weight:800;letter-spacing:.2px;color:var(--text)}
 .shell+.accountcard{margin-top:0}
 .subhead{position:relative;margin:0 0 8px;padding-left:12px;font-size:18px;font-weight:800;letter-spacing:.2px}
 .subhead:before{content:"";position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:2px;background:var(--gold)}
@@ -633,6 +638,9 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 <div class="notice">[[lan.note]]</div>
 </section>
 <section class="card networkcard" id="ethernet"><h2 class="subhead">[[eth.title]]</h2>
+<p>[[eth.lead]]</p>
+<div class="ethnow" id="ethNow"><div class="ethrow"><span class="meta">[[eth.now_ip]]</span><span class="value" id="ethIp">-</span><span class="ethmode" id="ethMode"></span></div><div class="ethrow"><span class="meta">[[eth.now_web]]</span><a class="value" id="ethUrl" href="#" target="_blank" rel="noopener noreferrer">-</a></div><div class="ethrow"><span class="meta">[[port.current]]</span><span class="value" id="portCurrent">-</span></div></div>
+<h3 class="minihead">[[eth.sub_ip]]</h3>
 <p>[[eth.intro]]</p>
 <form id="networkForm"><div class="radioopts"><label><input type="radio" name="netmode" id="modeDhcp" value="dhcp" checked> [[eth.dhcp]]</label><label><input type="radio" name="netmode" id="modeStatic" value="static"> [[eth.static]]</label></div>
 <div id="staticFields" class="hidden"><div class="formgrid">
@@ -648,10 +656,8 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 <button id="confirmNetwork" type="button" class="action">[[eth.confirm]]</button>
 </div>
 <div class="notice">[[eth.note]]</div>
-</section>
-<section class="card portcard" id="panelPort"><h2 class="subhead">[[port.title]]</h2>
+<div id="panelPort"><h3 class="minihead">[[port.title]]</h3>
 <p>[[port.intro]]</p>
-<p class="portnow"><strong>[[port.current]]</strong> <span id="portCurrent">-</span></p>
 <form id="portForm"><div class="formgrid"><div class="field"><label for="portInput">[[port.label]]</label><input id="portInput" type="number" inputmode="numeric" min="1024" max="65535" step="1" placeholder="5000" required></div></div>
 <div class="buttonrow"><button class="action" type="submit" id="applyPort">[[port.apply]]</button><span id="portMessage" class="netmessage" role="status"></span></div></form>
 <div id="portPendingBox" class="notice hidden"><strong class="dangerlabel">[[port.pending_title]]</strong>
@@ -661,6 +667,7 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 <button id="confirmPort" type="button" class="action">[[port.confirm]]</button>
 </div>
 <div class="notice">[[port.note]]</div>
+</div>
 </section>
 <section class="card securitycard" id="security"><h2 class="subhead">[[sec.title]]</h2>
 <p>[[sec.intro]]</p>
@@ -730,6 +737,7 @@ async function refresh(){
   }
   netData(data.network,data.lan);
   portData(data.port);
+  ethNow(data);
   if(data.error)msg(S(data.error),true);
  } catch(e){msg(e.message,true)}
 }
@@ -847,6 +855,17 @@ function showPortPending(pp){
     $('confirmPort').classList.toggle('hidden',!onNew);
     $('portPendingText').textContent=onNew?T('port.pending_new'):T('port.pending_old',{old:pp.old_port,new:pp.new_port});
   }else portPendingId='';
+}
+function ethNow(data){
+  const lan=data.lan||{};
+  const ip=lan.ip&&lan.ip!=='-'?lan.ip:'';
+  const port=(data.port&&data.port.current)||location.port||'443';
+  const mode=data.network&&data.network.mode;
+  $('ethIp').textContent=ip||'-';
+  $('ethMode').textContent=ip&&(mode==='static'||mode==='dhcp')?'('+T(mode==='static'?'eth.static':'eth.dhcp')+')':'';
+  const url=ip?'https://'+ip+':'+port+'/':'';
+  $('ethUrl').textContent=url||'-';
+  $('ethUrl').href=url||'#';
 }
 function portData(pt){
   if(!pt)return;

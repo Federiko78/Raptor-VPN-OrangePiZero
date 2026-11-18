@@ -2,11 +2,21 @@
 
 Il pannello risponde di norma sulla porta TCP **8443** (HTTPS, solo dalla rete Ethernet). Se quella porta
 dà fastidio sulla rete del cliente (per esempio il suo router la usa già per altro) la cambi dal pannello,
-sezione **Porta del pannello**, senza toccare la scheda da SSH.
+scheda **Ethernet**, sezione **Cambia la porta del pannello**, senza toccare la scheda da SSH.
+
+La scheda Ethernet raccoglie tutto quello che riguarda la rete cablata:
+
+1. in alto, **IP attuale** (con l'indicazione *DHCP automatico* o *IP statico*), **indirizzo dell'interfaccia web**
+   (`https://IP:PORTA/`, cliccabile) e **porta del pannello**;
+2. **Indirizzo IP: automatico (DHCP) o statico**;
+3. **Cambia la porta del pannello**.
+
+Il cambio di rete e il cambio di porta restano due operazioni separate, ognuna con la propria conferma
+e il proprio ripristino automatico.
 
 ## Come si cambia
 
-1. Scrivi la nuova porta (da **1024 a 65535**) e premi **Cambia porta**, poi conferma la domanda.
+1. Nella scheda **Ethernet** scrivi la nuova porta (da **1024 a 65535**) e premi **Cambia porta**, poi conferma la domanda.
 2. Dopo pochi secondi la pagina si sposta da sola al nuovo indirizzo (`https://…:NUOVA-PORTA/`).
    Il browser può chiedere di accettare di nuovo il certificato e bisogna **accedere di nuovo** con la password.
 3. Sul nuovo indirizzo compare il riquadro **Cambio di porta da confermare**: premi **Conferma la nuova porta**.

@@ -255,6 +255,7 @@ const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
   box:E('portPendingBox').classList.state.hidden,confirmHidden:E('confirmPort').classList.state.hidden,text:txt('portPendingText'),
   address:txt('portNewAddress'),href:E('portNewAddress').href,countdown:txt('portCountdown')};
  out.netAddress=txt('newAddress');
+ out.eth={ip:txt('ethIp'),mode:txt('ethMode'),url:txt('ethUrl'),href:E('ethUrl').href};
  if(cfg.messages)out.translated=cfg.messages.map(m=>vm.runInContext('S('+JSON.stringify(m)+')',ctx));
  out.pending=await Promise.resolve(0);
  console.log(JSON.stringify(out));
@@ -522,6 +523,38 @@ class JavaScriptRuntimeTests(unittest.TestCase):
         self.assertFalse(out['port']['applyDisabled'])
         self.assertEqual(out['navigations'], [])
 
+    def test_ethernet_card_shows_the_current_ip_and_the_web_interface_address(self):
+        out = self.run_page(status=self.port_status(current=5000))
+        self.assertEqual(out['eth']['ip'], '192.168.1.50')
+        self.assertEqual(out['eth']['url'], 'https://192.168.1.50:5000/')
+        self.assertEqual(out['eth']['href'], 'https://192.168.1.50:5000/')
+        self.assertEqual(out['port']['current'], '5000')
+
+    def test_the_address_follows_the_port_after_the_change(self):
+        before = self.run_page(status=self.port_status(current=8443))
+        after = self.run_page(status=self.port_status(current=5000))
+        self.assertEqual(before['eth']['url'], 'https://192.168.1.50:8443/')
+        self.assertEqual(after['eth']['url'], 'https://192.168.1.50:5000/')
+
+    def test_ethernet_card_says_how_the_ip_was_obtained(self):
+        dhcp = self.run_page(status=status_body(network={'supported': True, 'mode': 'dhcp'}, port=self.port_status()['port']))
+        static = self.run_page('it', status=status_body(network={'supported': True, 'mode': 'static', 'ip': '192.168.1.50', 'prefix': 24,
+                                                                'gateway': '192.168.1.1', 'dns': ['1.1.1.1']}, port=self.port_status()['port']))
+        unknown = self.run_page(status=status_body(network={'supported': False}, port=self.port_status()['port']))
+        self.assertEqual(dhcp['eth']['mode'], '(Automatic DHCP)')
+        self.assertEqual(static['eth']['mode'], '(IP statico)')
+        self.assertEqual(unknown['eth']['mode'], '')
+
+    def test_without_an_ip_there_is_no_address_to_open(self):
+        status = self.port_status()
+        status['lan'] = dict(status['lan'], ip='-')
+        out = self.run_page(status=status)
+        self.assertEqual((out['eth']['ip'], out['eth']['url'], out['eth']['href'], out['eth']['mode']), ('-', '-', '#', ''))
+
+    def test_without_port_information_the_address_uses_the_port_of_the_page(self):
+        out = self.run_page(status=status_body(), port='7777', href='https://192.168.1.50:7777/')
+        self.assertEqual(out['eth']['url'], 'https://192.168.1.50:7777/')
+
     def test_the_new_ethernet_address_follows_the_real_port(self):
         network = {'supported': True, 'mode': 'static', 'ip': '192.168.1.60', 'prefix': 24, 'gateway': '192.168.1.1', 'dns': ['1.1.1.1'],
                    'pending': {'id': 'd' * 14, 'mode': 'static', 'ip': '192.168.1.60', 'expires_at': stamp('2026-11-18 12:02:00'), 'state': 'applied'}}
@@ -552,6 +585,18 @@ class StaticPageTests(unittest.TestCase):
         missing = sorted(i for i in set(re.findall(r"\$\('([A-Za-z0-9_]+)'\)", dash_js())) if i not in ids)
         self.assertEqual(missing, [])
         self.assertTrue(looked)
+
+    def test_the_port_lives_inside_the_ethernet_card(self):
+        start, end = p.DASH.index('id="ethernet"'), p.DASH.index('id="security"')
+        inside = p.DASH[start:end]
+        for marker in ('id="ethNow"', 'id="ethIp"', 'id="ethUrl"', 'id="portCurrent"', 'id="networkForm"', 'id="portForm"', 'id="panelPort"'):
+            self.assertIn(marker, inside, marker)
+        self.assertEqual(p.DASH.count('id="panelPort"'), 1)
+        self.assertEqual(p.DASH.count('<section'), p.DASH.count('</section>'))
+        self.assertNotIn('portcard', p.DASH)
+        # ordine voluto: IP e indirizzo attuali, poi DHCP / IP statico, poi il cambio porta
+        order = [inside.index(m) for m in ('id="ethNow"', 'id="networkForm"', 'id="portForm"')]
+        self.assertEqual(order, sorted(order))
 
     def test_events_is_the_last_tab(self):
         tabs = re.findall(r'<a class="tab" href="#([A-Za-z]+)">', p.DASH)

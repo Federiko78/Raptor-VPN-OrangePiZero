@@ -21,7 +21,7 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - **Registro eventi** persistente (JSON Lines) con avvii, spegnimenti e **mancanze di corrente**, visibile nel pannello (ultima scheda). Vedi [`REGISTRO_EVENTI.md`](REGISTRO_EVENTI.md).
 - **Statistiche dei riavvii** in cima al pannello (oggi, settimana, mese, anno, con le mancanze di corrente) e contatori nella sezione Eventi.
 - **Due lingue**, inglese (predefinita) e italiano, scelte con il selettore EN | IT in alto: i testi stanno in `i18n/*.json`. Vedi [`LINGUE.md`](LINGUE.md).
-- **Porta del pannello cambiabile dall'interfaccia** (per esempio 5000 se il router del cliente usa già la 8443): il cambio va confermato dalla nuova porta entro 150 secondi, altrimenti la scheda torna da sola alla precedente; la porta scelta resta dopo gli aggiornamenti. Vedi [`PORTA_PANNELLO.md`](PORTA_PANNELLO.md).
+- **Porta del pannello cambiabile dall'interfaccia**, nella scheda Ethernet insieme a DHCP/IP statico, con IP attuale e indirizzo web in evidenza (per esempio 5000 se il router del cliente usa già la 8443): il cambio va confermato dalla nuova porta entro 150 secondi, altrimenti la scheda torna da sola alla precedente; la porta scelta resta dopo gli aggiornamenti. Vedi [`PORTA_PANNELLO.md`](PORTA_PANNELLO.md).
 - **Wi-Fi che annuncia l'IP** (`Raptor VPN - <IP>`, non collegabile, circa 3 minuti dopo ogni avvio): per trovare la scheda in una rete che non conosci. Vedi [`ACCESSO_DI_SERVIZIO.md`](ACCESSO_DI_SERVIZIO.md).
 
 ## Sistema operativo richiesto
