@@ -26,6 +26,7 @@ STATE = pathlib.Path('/var/lib/tailscale-panel-network')
 PENDING = STATE / 'pending.json'
 LOCK = pathlib.Path('/run/lock/tailscale-panel-network.lock')
 SELF = pathlib.Path('/usr/local/libexec/tailscale-panel-net-helper')
+SOCKET_UNIT = pathlib.Path('/etc/systemd/system/tailscale-panel.socket')
 WAIT_SECONDS = 150
 
 
@@ -48,6 +49,15 @@ def atomic_write(path, data, mode=0o600):
     finally:
         if temp.exists():
             temp.unlink()
+
+
+def panel_port():
+    """Port the panel listens on (it can be changed from the panel itself); 8443 if it cannot be read."""
+    try:
+        found = re.findall(r'(?m)^ListenStream=0\.0\.0\.0:(\d{1,5})$', SOCKET_UNIT.read_text())
+        return int(found[0]) if len(found) == 1 else 8443
+    except OSError:
+        return 8443
 
 
 def read_pending():
@@ -242,8 +252,8 @@ def start(config):
             cancel_timers(sid)
             raise RuntimeError('Unable to start the network change: '+apply_timer.stderr[-200:])
         return {'ok':True,'id':sid,'expires_at':pending['expires_at'],
-                'new_url':'https://'+ (config['ip'] if config['mode']=='static' else 'orangepizero.local')+':8443',
-                'host_url':'https://orangepizero.local:8443'}
+                'new_url':'https://'+ (config['ip'] if config['mode']=='static' else 'orangepizero.local')+':%d' % panel_port(),
+                'host_url':'https://orangepizero.local:%d' % panel_port()}
     return locked(perform)
 
 

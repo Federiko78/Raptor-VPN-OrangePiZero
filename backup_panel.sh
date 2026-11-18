@@ -18,9 +18,11 @@ usr/local/libexec/tailscale-panel-helper
 usr/local/libexec/tailscale-panel-net-helper
 usr/local/libexec/tailscale-panel-discovery
 usr/local/libexec/tailscale-panel-auth
+usr/local/libexec/tailscale-panel-port-helper
 etc/systemd/system/tailscale-panel.service
 etc/systemd/system/tailscale-panel.socket
 etc/systemd/system/tailscale-panel-net-recovery.service
+etc/systemd/system/tailscale-panel-port-recovery.service
 etc/systemd/system/tailscale-panel-route-guard.service
 etc/systemd/system/tailscaled.service.d/20-tspanel-guard.conf
 etc/sudoers.d/tailscale-panel

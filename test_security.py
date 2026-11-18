@@ -233,6 +233,115 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)['error'], 'chiave scaduta')
 
+    # ---------------------------------------------------------------- porta del pannello
+    PORT_PATHS = ('/api/port/start', '/api/port/confirm')
+
+    @staticmethod
+    def helper_reply(payload, code=0, error=''):
+        import types
+        return types.SimpleNamespace(stdout=json.dumps(payload), stderr=error, returncode=code)
+
+    def test_port_routes_require_login(self):
+        for path in self.PORT_PATHS:
+            with patch.object(p, 'run') as run:
+                status, _, _ = self.request('POST', path, body='{}', headers={'Content-Type': 'application/json'})
+            self.assertEqual(status, 401, path)
+            run.assert_not_called()
+
+    def test_port_routes_require_csrf_and_json(self):
+        token, csrf = self.session()
+        for path in self.PORT_PATHS:
+            with patch.object(p, 'run') as run:
+                self.assertEqual(self.post_json(path, {}, token, None)[0], 403, path)
+                self.assertEqual(self.post_json(path, {}, token, 'sbagliato')[0], 403, path)
+                self.assertEqual(self.post_json(path, {}, token, csrf, 'text/plain')[0], 415, path)
+            run.assert_not_called()
+
+    def test_port_start_forwards_only_the_port_to_the_root_helper(self):
+        token, csrf = self.session()
+        reply = {'ok': True, 'id': 'a' * 14, 'old_port': 8443, 'new_port': 5000, 'expires_at': 1}
+        with patch.object(p, 'run', return_value=self.helper_reply(reply)) as run:
+            status, _, body = self.post_json('/api/port/start', {'port': 5000}, token, csrf)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), reply)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ['/usr/bin/sudo', '-n', p.PORT_HELPER])
+        self.assertEqual(json.loads(run.call_args.kwargs['input_text']), {'action': 'start', 'port': 5000})
+
+    def test_port_start_rejects_bad_requests_before_the_helper(self):
+        token, csrf = self.session()
+        bad = [[], 5, {}, {'port': '5000'}, {'port': 5000.5}, {'port': True}, {'port': None}, {'port': [5000]},
+               {'port': 5000, 'extra': 1}, {'port': 5000, 'action': 'confirm'}, {'id': 'a' * 14}]
+        for payload in bad:
+            with patch.object(p, 'run') as run:
+                status, _, _ = self.post_json('/api/port/start', payload, token, csrf)
+            self.assertEqual(status, 400, payload)
+            run.assert_not_called()
+
+    def test_port_confirm_reports_the_port_the_browser_really_used(self):
+        token, csrf = self.session()
+        with patch.object(p, 'run', return_value=self.helper_reply({'ok': True, 'confirmed': True, 'port': self.port})) as run:
+            status, _, _ = self.post_json('/api/port/confirm', {'id': 'a' * 14}, token, csrf)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(run.call_args.kwargs['input_text']), {'action': 'confirm', 'id': 'a' * 14, 'port': self.port})
+
+    def test_port_confirm_cannot_be_given_a_port_by_the_client(self):
+        token, csrf = self.session()
+        for payload in ({'id': 'a' * 14, 'port': 5000}, {}, {'port': 5000}, []):
+            with patch.object(p, 'run') as run:
+                status, _, _ = self.post_json('/api/port/confirm', payload, token, csrf)
+            self.assertEqual(status, 400, payload)
+            run.assert_not_called()
+
+    def test_port_helper_refusal_is_returned_as_an_error(self):
+        token, csrf = self.session()
+        refusal = {'ok': False, 'error': 'Open the panel on the new port to confirm.'}
+        with patch.object(p, 'run', return_value=self.helper_reply(refusal, code=1)):
+            status, _, body = self.post_json('/api/port/confirm', {'id': 'a' * 14}, token, csrf)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)['error'], 'Open the panel on the new port to confirm.')
+        with patch.object(p, 'run', return_value=self.helper_reply('', code=1, error='sudo: a password is required')):
+            status, _, body = self.post_json('/api/port/start', {'port': 5000}, token, csrf)
+        self.assertEqual(status, 400)
+        self.assertIn('password is required', json.loads(body)['error'])
+
+    def test_status_carries_the_port_state_and_survives_a_missing_helper(self):
+        pending = {'id': 'a' * 14, 'old_port': 8443, 'new_port': 5000, 'expires_at': 99, 'state': 'applied'}
+        import types
+
+        def fake(args, timeout=6, input_text=None):
+            if p.PORT_HELPER in args:
+                return self.helper_reply({'ok': True, 'port': {'supported': True, 'current': 5000, 'min': 1024, 'max': 65535, 'pending': pending}})
+            if p.NET_HELPER in args:
+                return self.helper_reply({'ok': True, 'network': {'supported': False}})
+            return types.SimpleNamespace(stdout='', stderr='', returncode=1)
+        with patch.object(p, 'run', fake), patch.object(p, 'lan_details', return_value={}), patch.object(p, 'saved_state', return_value={}):
+            self.assertEqual(p.status_data()['port']['pending'], pending)
+            self.assertEqual(p.status_data()['port']['current'], 5000)
+
+        def broken(args, timeout=6, input_text=None):
+            if p.PORT_HELPER in args:
+                return types.SimpleNamespace(stdout='', stderr='sudo: a password is required', returncode=1)
+            return fake(args, timeout, input_text)
+        with patch.object(p, 'run', broken), patch.object(p, 'lan_details', return_value={}), patch.object(p, 'saved_state', return_value={}):
+            port = p.status_data()['port']
+        self.assertEqual((port['supported'], port['current']), (False, p.PORT))
+        self.assertIn('password is required', port['reason'])
+
+        def crashing(args, timeout=6, input_text=None):
+            if p.PORT_HELPER in args:
+                raise OSError('no such file')
+            return fake(args, timeout, input_text)
+        with patch.object(p, 'run', crashing), patch.object(p, 'lan_details', return_value={}), patch.object(p, 'saved_state', return_value={}):
+            self.assertFalse(p.status_data()['port']['supported'])
+
+    def test_dashboard_contains_the_port_card(self):
+        token, _ = self.session()
+        status, _, html = self.request('GET', '/', headers={'Cookie': token})
+        self.assertEqual(status, 200)
+        for marker in ('id="panelPort"', 'id="portForm"', 'id="portInput"', 'id="confirmPort"'):
+            self.assertIn(marker, html)
+
     def test_login_errors_are_shown_inside_the_card_and_csp_allows_only_data_images(self):
         status, _, body = self.login('sbagliata-sbagliata')
         self.assertEqual(status, 401)

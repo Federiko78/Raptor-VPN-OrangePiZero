@@ -8,7 +8,7 @@ Ognuno scrive un solo file di configurazione e si può annullare.
 |---|---|---|
 | `harden_ssh.sh` | SSH solo con chiave, niente login root, meno tentativi | `harden_ssh.sh --revert` |
 | `harden_system.sh` | LLMNR/mDNS di resolved spenti, solo aggiornamenti di sicurezza Debian, watchdog hardware | cancellare i file indicati a video |
-| `input_firewall.sh` | scarta il traffico in ingresso dalla LAN tranne pannello (8443), DHCP, mDNS, ping (+ SSH se voluto) | `input_firewall.sh remove` |
+| `input_firewall.sh` | scarta il traffico in ingresso dalla LAN tranne pannello (8443, o la porta scelta dal pannello: segue il cambio da solo), DHCP, mDNS, ping (+ SSH se voluto) | `input_firewall.sh remove` |
 
 ## Ordine consigliato
 

@@ -11,7 +11,7 @@ die() { printf '\nERRORE: %s\n' "$*" >&2; exit 1; }
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$BASE"
 command -v python3 >/dev/null 2>&1 || die 'python3 mancante: eseguire  apt-get update && apt-get install -y python3  (oppure usare bootstrap.sh)'
-for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py panel_i18n.py i18n/en.json i18n/it.json check_installation.sh backup_panel.sh restore_panel.sh; do
+for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py tailscale_panel_port.py password_policy.py panel_assets.py panel_i18n.py i18n/en.json i18n/it.json check_installation.sh backup_panel.sh restore_panel.sh; do
   [ -s "$f" ] || die "File mancante nel pacchetto: $f"
 done
 if [ -f SHA256SUMS ]; then
@@ -20,7 +20,7 @@ if [ -f SHA256SUMS ]; then
 fi
 
 say 'Preflight sorgenti (senza modifiche)'
-for module in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py panel_i18n.py raptor_ap.py raptor_eventlog.py; do
+for module in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py tailscale_panel_port.py password_policy.py panel_assets.py panel_i18n.py raptor_ap.py raptor_eventlog.py; do
   python3 - "$module" <<'PYCOMPILE' || die "Errore di sintassi in $module"
 import ast, sys
 with open(sys.argv[1], encoding='utf-8') as fd:
@@ -175,7 +175,7 @@ printf ' TAILSCALE CONTROL PANEL FACTORY R1.3.2 - INSTALLATO\n'
 printf '=====================================================\n'
 printf '1) Usa la password Web UI scelta durante l’installazione (non visualizzata).\n'
 printf '2) Collega Tailscale dal pannello (sezione Account Tailscale: link di accesso oppure chiave + tag). Vedi ACCOUNT_TAILSCALE.md.\n'
-printf '3) Apri https://IP-ETHERNET:8443 sul PC nella LAN.\n'
+printf '3) Apri https://IP-ETHERNET:8443 sul PC nella LAN (la porta si cambia dal pannello, sezione Porta del pannello).\n'
 printf '4) LAN OFF, nessun host scelto, nessuna rotta. Configura solo quando pronto.\n'
 printf '5) Prima di pubblicare subnet: regole tailnet + approvazione rotta.\n'
 printf '6) Non aprire TCP 8443 verso Internet.\n'

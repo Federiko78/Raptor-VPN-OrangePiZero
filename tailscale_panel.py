@@ -37,6 +37,7 @@ CERT_PATH = '/etc/tailscale-panel/cert.pem'
 KEY_PATH = '/etc/tailscale-panel/key.pem'
 HELPER = '/usr/local/libexec/tailscale-panel-helper'
 NET_HELPER = '/usr/local/libexec/tailscale-panel-net-helper'
+PORT_HELPER = '/usr/local/libexec/tailscale-panel-port-helper'
 DISCOVERY_HELPER = '/usr/local/libexec/tailscale-panel-discovery'
 AUTH_HELPER = '/usr/local/libexec/tailscale-panel-auth'
 # Link di accesso Tailscale: ammesso solo https verso *.tailscale.com/a/<codice>.
@@ -365,6 +366,13 @@ def status_data():
         result['network'] = net_status.get('network', {'supported':False, 'reason':proc.stderr.strip()[:250] or 'Ethernet management not available'})
     except (OSError, subprocess.TimeoutExpired) as err:
         result['network']={'supported':False, 'reason':str(err)[:250]}
+    try:
+        proc=run(['/usr/bin/sudo','-n',PORT_HELPER], timeout=9,
+                 input_text=json.dumps({'action':'status'}))
+        port_status=read_json_from_string(proc.stdout)
+        result['port'] = port_status.get('port', {'supported':False, 'current':PORT, 'reason':proc.stderr.strip()[:250] or 'Port management not available'})
+    except (OSError, subprocess.TimeoutExpired) as err:
+        result['port']={'supported':False, 'current':PORT, 'reason':str(err)[:250]}
     return result
 
 
@@ -425,7 +433,9 @@ small,.muted{color:var(--muted)}
 .dot.good{background:var(--green);box-shadow:0 0 10px rgba(0,229,138,.5)}
 .dot.bad{background:var(--red);box-shadow:0 0 10px rgba(255,54,88,.5)}
 .columns{display:grid;grid-template-columns:1.7fr 1fr;gap:16px;margin-top:16px}
-.accountcard,.networkcard,.discoverycard,.securitycard,.eventscard{margin-top:16px}
+.accountcard,.networkcard,.portcard,.discoverycard,.securitycard,.eventscard{margin-top:16px}
+#portInput{max-width:220px}
+.portnow{margin:0 0 12px}
 .shell+.accountcard{margin-top:0}
 .subhead{position:relative;margin:0 0 8px;padding-left:12px;font-size:18px;font-weight:800;letter-spacing:.2px}
 .subhead:before{content:"";position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:2px;background:var(--gold)}
@@ -639,6 +649,19 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 </div>
 <div class="notice">[[eth.note]]</div>
 </section>
+<section class="card portcard" id="panelPort"><h2 class="subhead">[[port.title]]</h2>
+<p>[[port.intro]]</p>
+<p class="portnow"><strong>[[port.current]]</strong> <span id="portCurrent">-</span></p>
+<form id="portForm"><div class="formgrid"><div class="field"><label for="portInput">[[port.label]]</label><input id="portInput" type="number" inputmode="numeric" min="1024" max="65535" step="1" placeholder="5000" required></div></div>
+<div class="buttonrow"><button class="action" type="submit" id="applyPort">[[port.apply]]</button><span id="portMessage" class="netmessage" role="status"></span></div></form>
+<div id="portPendingBox" class="notice hidden"><strong class="dangerlabel">[[port.pending_title]]</strong>
+<p id="portPendingText"></p>
+<p><strong>[[eth.new_address]]</strong> <a id="portNewAddress" href="#" rel="noopener noreferrer"></a></p>
+<p><strong>[[eth.expires]]</strong> <span id="portCountdown">-</span></p>
+<button id="confirmPort" type="button" class="action">[[port.confirm]]</button>
+</div>
+<div class="notice">[[port.note]]</div>
+</section>
 <section class="card securitycard" id="security"><h2 class="subhead">[[sec.title]]</h2>
 <p>[[sec.intro]]</p>
 <form id="passwordForm" autocomplete="on"><div class="formgrid">
@@ -706,6 +729,7 @@ async function refresh(){
     renderDevices();first=false;
   }
   netData(data.network,data.lan);
+  portData(data.port);
   if(data.error)msg(S(data.error),true);
  } catch(e){msg(e.message,true)}
 }
@@ -770,7 +794,8 @@ $('modeStatic').onchange=showNetFields;
 function showPending(p){
   $('pendingBox').classList.toggle('hidden',!p);
   if(p){pendingId=p.id;
-    const url=p.mode==='static'?'https://'+p.ip+':8443':'https://orangepizero.local:8443';
+    const port=location.port||'443';
+    const url=p.mode==='static'?'https://'+p.ip+':'+port:'https://orangepizero.local:'+port;
     $('newAddress').textContent=url;$('newAddress').href=url;
     $('pendingCountdown').textContent=T('eth.seconds',{n:Math.max(0,p.expires_at-Math.floor(Date.now()/1000))});
   }else pendingId='';
@@ -809,6 +834,49 @@ $('confirmNetwork').onclick=async()=>{
     showPending(null);netMsg(T('eth.confirmed'),false);netLoaded=false;await refresh();
   }catch(e){netMsg(e.message,true);}
 };
+let portPendingId='';
+function portMsg(t,error){$('portMessage').textContent=t;$('portMessage').className=error?'netmessage err':'netmessage ok';}
+function portUrl(port){const u=new URL(location.href);u.port=String(port);u.pathname='/';u.search='';u.hash='';return u.toString();}
+function showPortPending(pp){
+  $('portPendingBox').classList.toggle('hidden',!pp);
+  if(pp){portPendingId=pp.id;
+    const url=portUrl(pp.new_port);
+    $('portNewAddress').textContent=url;$('portNewAddress').href=url;
+    $('portCountdown').textContent=T('eth.seconds',{n:Math.max(0,pp.expires_at-Math.floor(Date.now()/1000))});
+    const onNew=String(location.port||'443')===String(pp.new_port);
+    $('confirmPort').classList.toggle('hidden',!onNew);
+    $('portPendingText').textContent=onNew?T('port.pending_new'):T('port.pending_old',{old:pp.old_port,new:pp.new_port});
+  }else portPendingId='';
+}
+function portData(pt){
+  if(!pt)return;
+  $('portCurrent').textContent=pt.current;
+  $('applyPort').disabled=!pt.supported||!!pt.pending;
+  if(!pt.supported)portMsg(T('port.unsupported',{reason:pt.reason?S(pt.reason):T('port.reason_default')}),true);
+  showPortPending(pt.pending);
+}
+$('portForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const port=Number($('portInput').value);
+  if(!Number.isInteger(port)||port<1024||port>65535){portMsg(T('port.invalid'),true);return;}
+  if(!window.confirm(T('port.confirm_start',{port})))return;
+  $('applyPort').disabled=true;
+  try{
+    const resp=await fetch('/api/port/start',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({port})});
+    const data=await resp.json();if(!resp.ok)throw Error(S(data.error)||T('port.failed'));
+    portMsg(T('port.scheduled',{port:data.new_port}),false);
+    showPortPending({id:data.id,old_port:data.old_port,new_port:data.new_port,expires_at:data.expires_at});
+    setTimeout(()=>{window.location.href=portUrl(data.new_port);},8000);
+  }catch(err){portMsg(S(err.message),true);$('applyPort').disabled=false;}
+});
+$('confirmPort').onclick=async()=>{
+  if(!portPendingId)return;
+  try{
+    const resp=await fetch('/api/port/confirm',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({id:portPendingId})});
+    const data=await resp.json();if(!resp.ok)throw Error(S(data.error)||T('port.confirm_failed'));
+    showPortPending(null);portMsg(T('port.confirmed',{port:data.port}),false);await refresh();
+  }catch(err){portMsg(S(err.message),true);}
+};
 $('passwordForm').addEventListener('submit',async e=>{
  e.preventDefault();
  const oldPassword=$('oldPassword').value, newPassword=$('newPassword').value, confirmPassword=$('repeatPassword').value;
@@ -827,7 +895,7 @@ $('passwordForm').addEventListener('submit',async e=>{
  }catch(error){message.className='err';message.textContent=error.message;}
  finally{$('changePassword').disabled=false;}
 });
-setInterval(()=>{if(pendingId){refresh();}},6000);
+setInterval(()=>{if(pendingId||portPendingId){refresh();}},6000);
 const stateLabel=s=>has('state.'+s)?T('state.'+s):s;
 let accWaiting=false;
 function safeAuthUrl(u){try{const x=new URL(u);return x.protocol==='https:'&&/(^|[.])tailscale[.]com$/.test(x.hostname)&&x.pathname.startsWith('/a/')&&!x.username&&!x.password&&!x.port;}catch(e){return false;}}
@@ -1247,6 +1315,31 @@ class Handler(BaseHTTPRequestHandler):
                 result=read_json_from_string(proc.stdout)
                 if proc.returncode or not result.get('ok'):
                     return self._json(400, {'error':str(result.get('error') or proc.stderr.strip() or 'Network error')[:500]})
+                return self._json(200,result)
+            if path in ('/api/port/start','/api/port/confirm'):
+                if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':
+                    return self._json(415, {'error':'Unsupported Content-Type'})
+                if not self._csrf(session, self.headers.get('X-CSRF-Token', '')):
+                    return self._json(403, {'error':'Invalid CSRF token'})
+                payload = json.loads(body.decode('utf-8'))
+                if not isinstance(payload,dict):
+                    raise ValueError('Invalid port request.')
+                if path.endswith('/start'):
+                    if set(payload) != {'port'}:
+                        raise ValueError('Invalid port fields.')
+                    if isinstance(payload['port'], bool) or not isinstance(payload['port'], int):
+                        raise ValueError('The port must be a whole number.')
+                    req={'action':'start','port':payload['port']}
+                else:
+                    if set(payload) != {'id'}:
+                        raise ValueError('Invalid confirmation.')
+                    # The port the browser really used: the root helper only confirms from the NEW one.
+                    req={'action':'confirm','id':payload['id'],'port':self.connection.getsockname()[1]}
+                proc=run(['/usr/bin/sudo','-n',PORT_HELPER], timeout=28,
+                         input_text=json.dumps(req))
+                result=read_json_from_string(proc.stdout)
+                if proc.returncode or not result.get('ok'):
+                    return self._json(400, {'error':str(result.get('error') or proc.stderr.strip() or 'Port error')[:500]})
                 return self._json(200,result)
             if path in ('/api/tailscale/login', '/api/tailscale/logout', '/api/tailscale/connect', '/api/tailscale/down'):
                 if self.headers.get('Content-Type', '').split(';')[0] != 'application/json':

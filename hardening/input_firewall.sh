@@ -6,7 +6,7 @@
 #   input_firewall.sh apply                        applica la configurazione salvata (lo usa systemd)
 #   input_firewall.sh remove                       toglie regole e servizio
 #
-# Politica: dalla LAN del cliente entra solo il pannello (TCP 8443), il DHCP, mDNS
+# Politica: dalla LAN del cliente entra solo il pannello (TCP 8443 o la porta scelta dal pannello), il DHCP, mDNS
 # (orangepizero.local), ping e, se --ssh-lan on, SSH. Da tailscale0 entra tutto
 # (a filtrare provvedono le ACL/Grants Tailscale). Il resto viene scartato.
 #
@@ -28,6 +28,12 @@ die() { echo "ERRORE: $*" >&2; exit 1; }
 
 load_conf() {
   LAN_DEV=end0; PANEL_PORT=8443; SSH_LAN=1
+  # La porta del pannello si puo' cambiare dal pannello web: la fonte e' l'unita' socket. Senza questo,
+  # un'installazione del firewall DOPO il cambio aprirebbe 8443 e chiuderebbe la porta vera.
+  if [ -r /etc/systemd/system/tailscale-panel.socket ]; then
+    SOCK_PORT=$(sed -n 's/^ListenStream=0\.0\.0\.0:\([0-9]\{1,5\}\)$/\1/p' /etc/systemd/system/tailscale-panel.socket | head -n 1)
+    [ -z "$SOCK_PORT" ] || PANEL_PORT=$SOCK_PORT
+  fi
   if [ -r /etc/tailscale-panel-lan.conf ]; then
     LAN_DEV=$(head -c 40 /etc/tailscale-panel-lan.conf | tr -d '[:space:]')
   fi

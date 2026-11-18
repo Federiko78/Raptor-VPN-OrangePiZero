@@ -15,6 +15,14 @@ HELPER=/usr/local/libexec/tailscale-panel-helper
 NET_HELPER=/usr/local/libexec/tailscale-panel-net-helper
 DISCOVERY_HELPER=/usr/local/libexec/tailscale-panel-discovery
 AUTH_HELPER=/usr/local/libexec/tailscale-panel-auth
+PORT_HELPER=/usr/local/libexec/tailscale-panel-port-helper
+SOCKET_UNIT=/etc/systemd/system/tailscale-panel.socket
+# La porta si puo' cambiare dal pannello: la fonte e' l'unita' socket gia' installata. Un aggiornamento
+# la conserva (altrimenti tornerebbe a 8443 e il cliente non raggiungerebbe piu' il pannello).
+# PORT=nnnn nella riga di comando ha sempre la precedenza.
+if [ -z "${PORT:-}" ] && [ -r "$SOCKET_UNIT" ]; then
+  PORT=$(sed -n 's/^ListenStream=0\.0\.0\.0:\([0-9]\{1,5\}\)$/\1/p' "$SOCKET_UNIT" | head -n 1)
+fi
 PORT=${PORT:-8443}
 case "$PORT" in
   ''|*[!0-9]*) echo "PORT deve essere un numero" >&2; exit 1;;
@@ -22,7 +30,11 @@ esac
 if [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
   echo "Scegliere una porta TCP fra 1024 e 65535" >&2; exit 1
 fi
-for src in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py password_policy.py panel_assets.py panel_i18n.py; do
+if [ -e /var/lib/tailscale-panel-port/pending.json ]; then
+  echo "Cambio di porta del pannello in sospeso: confermarlo dal pannello o attendere il ripristino automatico (circa 2 minuti), poi rilanciare." >&2
+  exit 1
+fi
+for src in tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py tailscale_panel_port.py password_policy.py panel_assets.py panel_i18n.py; do
   if [ ! -r "$DIR/$src" ]; then
     echo "Manca il file $DIR/$src: trasferire tutti i file nella stessa cartella." >&2
     exit 1
@@ -117,10 +129,11 @@ install -m 755 -o root -g root "$DIR/tailscale_panel_helper.py" "$HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_network.py" "$NET_HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_discovery.py" "$DISCOVERY_HELPER"
 install -m 755 -o root -g root "$DIR/tailscale_panel_auth.py" "$AUTH_HELPER"
+install -m 755 -o root -g root "$DIR/tailscale_panel_port.py" "$PORT_HELPER"
 
 # Exact command permitted; no arbitrary root commands or arguments.
 cat > /etc/sudoers.d/tailscale-panel <<'EOF'
-tspanel ALL=(root) NOPASSWD: /usr/local/libexec/tailscale-panel-helper "", /usr/local/libexec/tailscale-panel-net-helper "", /usr/local/libexec/tailscale-panel-discovery "", /usr/local/libexec/tailscale-panel-auth ""
+tspanel ALL=(root) NOPASSWD: /usr/local/libexec/tailscale-panel-helper "", /usr/local/libexec/tailscale-panel-net-helper "", /usr/local/libexec/tailscale-panel-discovery "", /usr/local/libexec/tailscale-panel-auth "", /usr/local/libexec/tailscale-panel-port-helper ""
 EOF
 chmod 0440 /etc/sudoers.d/tailscale-panel
 if ! visudo -cf /etc/sudoers.d/tailscale-panel >/dev/null; then
@@ -306,6 +319,21 @@ TimeoutStartSec=110
 WantedBy=multi-user.target
 EOF
 
+# Port change never confirmed (for instance power lost during the 2 minutes): back to the previous port at boot.
+cat > /etc/systemd/system/tailscale-panel-port-recovery.service <<EOF
+[Unit]
+Description=Restore the previous panel port if a port change was never confirmed
+After=tailscale-panel.socket
+
+[Service]
+Type=oneshot
+ExecStart=$PORT_HELPER --recover
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # Restore panel's forwarding filter BEFORE tailscaled starts on next boot.
 # Use a dedicated chain; never flush client-defined firewall tables or rules.
 cat > /etc/systemd/system/tailscale-panel-route-guard.service <<EOF
@@ -341,6 +369,7 @@ systemctl daemon-reload
 systemctl enable tailscale-panel-route-guard.service
 systemctl restart tailscale-panel-route-guard.service
 systemctl enable tailscale-panel-net-recovery.service
+systemctl enable tailscale-panel-port-recovery.service
 systemctl enable --now tailscale-panel.socket
 systemctl restart tailscale-panel.service
 sleep 1

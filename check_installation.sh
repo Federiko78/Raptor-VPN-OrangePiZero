@@ -21,12 +21,15 @@ line 'Architettura' "$(dpkg --print-architecture)"
 line 'Kernel' "$(uname -r)"
 expect_active tailscaled.service
 expect_active tailscale-panel.socket
+# Porta del pannello: la si cambia dal pannello, la fonte e' l'unita' socket.
+PANEL_PORT=$(sed -n 's/^ListenStream=0\.0\.0\.0:\([0-9]\{1,5\}\)$/\1/p' /etc/systemd/system/tailscale-panel.socket 2>/dev/null | head -n 1)
+PANEL_PORT=${PANEL_PORT:-8443}
 # Il pannello e' attivato dalla socket: dopo un riavvio parte alla prima connessione. Lo
 # "svegliamo" prima di controllarlo, cosi' il risultato non dipende dal momento. Se non riesce
 # a partire, qui resta ERRORE (guasto vero).
 WAKE_IP=$(ip -4 -o addr show dev end0 scope global 2>/dev/null | awk '{split($4,a,"/"); if (a[1] !~ /^169\.254\./) {print a[1]; exit}}')
 if [ -n "$WAKE_IP" ]; then
-  curl --noproxy '*' -sk --connect-timeout 5 --max-time 10 -o /dev/null "https://$WAKE_IP:8443/login" 2>/dev/null || true
+  curl --noproxy '*' -sk --connect-timeout 5 --max-time 10 -o /dev/null "https://$WAKE_IP:$PANEL_PORT/login" 2>/dev/null || true
   sleep 1
 fi
 expect_active tailscale-panel.service
@@ -36,6 +39,17 @@ if [ "$(systemctl is-enabled tailscale-panel-net-recovery.service 2>/dev/null ||
   line 'Recovery Ethernet a riavvio' 'OK (enabled)'
 else
   line 'Recovery Ethernet a riavvio' 'ERRORE (not enabled)'; ok=0
+fi
+if [ -x /usr/local/libexec/tailscale-panel-port-helper ] && \
+   grep -Fq '/usr/local/libexec/tailscale-panel-port-helper ""' /etc/sudoers.d/tailscale-panel 2>/dev/null && \
+   [ "$(systemctl is-enabled tailscale-panel-port-recovery.service 2>/dev/null || true)" = enabled ] && \
+   [ "$(printf '{"action":"nonsense"}' | timeout 12 runuser -u tspanel -- sudo -n /usr/local/libexec/tailscale-panel-port-helper 2>/dev/null | grep -c '"ok": false' || true)" = 1 ]; then
+  line "Porta del pannello da GUI (porta $PANEL_PORT)" 'OK (programma root autorizzato, ripristino a riavvio attivo)'
+else
+  line 'Porta del pannello da GUI' 'ERRORE: programma, regola sudoers o servizio di ripristino mancanti (rilanciare install_tailscale_panel.sh)'; ok=0
+fi
+if [ -e /var/lib/tailscale-panel-port/pending.json ]; then
+  line 'Cambio di porta' 'DA VERIFICARE: in sospeso, non confermato (si ripristina da solo)'
 fi
 if [ "$(systemctl show tailscale-panel.service -p ReadWritePaths --value 2>/dev/null)" = /etc/tailscale-panel ]; then
   line 'Fix cambio password' 'OK'
@@ -125,7 +139,7 @@ line 'Spazio root libero (MiB)' "$(df -Pm / | awk 'NR==2 {print $4}')"
 LAN_IP=$(ip -4 -o addr show dev end0 scope global 2>/dev/null | awk '{split($4,a,"/"); if (a[1] !~ /^169\.254\./) {print a[1]; exit}}')
 line 'IP attuale end0' "${LAN_IP:-non assegnato}"
 if [ -n "$LAN_IP" ]; then
-  STATUS=$(curl --noproxy '*' -sk --connect-timeout 5 --max-time 8 -o /dev/null -w '%{http_code}' "https://$LAN_IP:8443/login" 2>/dev/null || true)
+  STATUS=$(curl --noproxy '*' -sk --connect-timeout 5 --max-time 8 -o /dev/null -w '%{http_code}' "https://$LAN_IP:$PANEL_PORT/login" 2>/dev/null || true)
   if [ "$STATUS" = 200 ]; then
     line 'HTTPS /login su Ethernet' 'OK (200)'
   else

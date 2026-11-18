@@ -26,7 +26,7 @@ spec.loader.exec_module(p)
 
 CAT = i18n.Catalog()
 EN = CAT.langs['en']
-NAMESPACES = ('top', 'nav', 'lang', 'stat', 'sum', 'state', 'acc', 'routes', 'info', 'lan', 'eth', 'sec', 'ev', 'count', 'unit', 'js', 'login')
+NAMESPACES = ('top', 'nav', 'lang', 'stat', 'sum', 'state', 'acc', 'routes', 'info', 'lan', 'eth', 'port', 'sec', 'ev', 'count', 'unit', 'js', 'login')
 # Valori che il server/registro puo' produrre e che il JavaScript traduce con una famiglia di chiavi.
 PREVIOUS = ('first_boot', 'clean_reboot', 'clean_poweroff', 'clean_halt', 'clean_unknown', 'unclean', 'unknown')
 KINDS = ('reboot', 'poweroff', 'halt', 'unknown')
@@ -213,7 +213,7 @@ const page=fs.readFileSync(process.argv[2],'utf8'),cfg=JSON.parse(fs.readFileSyn
 const code=/<script>([\s\S]*)<\/script>/.exec(page)[1];
 const ids=new Set([...page.matchAll(/\bid="([A-Za-z0-9_]+)"/g)].map(m=>m[1]));
 const make=id=>{let t='',h='';const o={id,hidden:false,className:'',value:'',checked:false,disabled:false,style:{},children:[],handlers:{},href:'',selectionStart:0,
- classList:{toggle(){},add(){},remove(){}},append(...a){this.children.push(...a)},replaceChildren(...a){this.children=a},
+ classList:{state:{},toggle(n,f){this.state[n]=!!f},add(){},remove(){}},append(...a){this.children.push(...a)},replaceChildren(...a){this.children=a},
  addEventListener(t,f){this.handlers[t]=f},setSelectionRange(){}};
  Object.defineProperty(o,'textContent',{get:()=>t,set:v=>{t=String(v)},enumerable:true});
  Object.defineProperty(o,'innerHTML',{get:()=>h,set:v=>{h=String(v)},enumerable:true});return o;};
@@ -221,10 +221,11 @@ const els={};const E=id=>els[id]||(els[id]=make(id));
 const document={hidden:false,getElementById(id){if(!ids.has(id))throw new Error('the page has no element with id '+id);return els[id]||(els[id]=make(id));},createElement:t=>make('<'+t+'>')};
 const RealDate=Date;
 class FakeDate extends RealDate{constructor(...a){if(a.length===0)super(cfg.now*1000);else super(...a);}static now(){return cfg.now*1000;}}
-const calls=[],bodies={};
+const calls=[],bodies={},navigations=[],later=[];
+const loc={port:cfg.port||'8443',get href(){return cfg.href||'https://orangepizero.local:8443/'},set href(v){navigations.push(v)},replace(){}};
 const fetch=async(url,opts)=>{calls.push(url);if(opts&&opts.body)bodies[url]=JSON.parse(opts.body);const r=cfg.responses[url];if(r===undefined)throw new Error('unexpected fetch '+url);
  return {ok:r.ok!==false,json:async()=>r.body};};
-const ctx={document,fetch,Date:FakeDate,window:{confirm:()=>true,location:{replace(){}}},navigator:{},setInterval(){},setTimeout:setTimeout,console,Error,Promise,URL,JSON,Math,Set,Array,Object,String,Number,RegExp,Boolean,Intl,isNaN};
+const ctx={document,fetch,Date:FakeDate,window:{confirm:()=>cfg.confirm!==false,location:loc},location:loc,navigator:{},setInterval(){},setTimeout:(f,ms)=>{if(ms>=5000){later.push([f,ms]);return 0;}return setTimeout(f,ms);},console,Error,Promise,URL,JSON,Math,Set,Array,Object,String,Number,RegExp,Boolean,Intl,isNaN};
 vm.createContext(ctx);
 const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
 (async()=>{
@@ -246,6 +247,14 @@ const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
  if(cfg.clicks){out.hidden=[];for(const id of cfg.clicks){await E(id).handlers.click();await new Promise(r=>setTimeout(r,40));
    out.hidden.push(Object.fromEntries(['accOff','accOffBox','accLogout','accLogoutBox'].map(k=>[k,E(k).hidden])));}
   out.posted=Object.keys(bodies);out.calls=calls;out.accNote=txt('accNote');}
+ if(cfg.port_submit){E('portInput').value=cfg.port_submit.value;await E('portForm').handlers.submit({preventDefault(){}});await new Promise(r=>setTimeout(r,40));}
+ if(cfg.port_confirm){const b=E('confirmPort');await (b.onclick||b.handlers.click)();await new Promise(r=>setTimeout(r,40));}
+ out.later=later.map(x=>x[1]);if(cfg.flush_later){later.forEach(x=>x[0]());}
+ out.navigations=navigations;out.portSent=bodies['/api/port/start'];out.portConfirmSent=bodies['/api/port/confirm'];out.calls=calls;
+ out.port={current:txt('portCurrent'),applyDisabled:E('applyPort').disabled,msg:txt('portMessage'),msgClass:E('portMessage').className,
+  box:E('portPendingBox').classList.state.hidden,confirmHidden:E('confirmPort').classList.state.hidden,text:txt('portPendingText'),
+  address:txt('portNewAddress'),href:E('portNewAddress').href,countdown:txt('portCountdown')};
+ out.netAddress=txt('newAddress');
  if(cfg.messages)out.translated=cfg.messages.map(m=>vm.runInContext('S('+JSON.stringify(m)+')',ctx));
  out.pending=await Promise.resolve(0);
  console.log(JSON.stringify(out));
@@ -290,8 +299,8 @@ def status_body(**extra):
 
 @unittest.skipUnless(NODE, 'node not installed')
 class JavaScriptRuntimeTests(unittest.TestCase):
-    def run_page(self, lang='en', status=None, events=None, typing=None, messages=None, submit=None, extra=None, clicks=None):
-        cfg = {'now': stamp('2026-11-18 12:00:00'), 'typing': typing, 'messages': messages, 'submit': submit, 'clicks': clicks,
+    def run_page(self, lang='en', status=None, events=None, typing=None, messages=None, submit=None, extra=None, clicks=None, **options):
+        cfg = {'now': stamp('2026-11-18 12:00:00'), 'typing': typing, 'messages': messages, 'submit': submit, 'clicks': clicks, **options,
                'responses': {'/api/status': {'body': status or status_body()}, '/api/events': {'body': events or events_body()}}}
         cfg['responses'].update(extra or {})
         with tempfile.TemporaryDirectory() as folder:
@@ -433,6 +442,92 @@ class JavaScriptRuntimeTests(unittest.TestCase):
         out = self.run_page('it', clicks=['accOff', 'accOffYes'], extra=reply)
         self.assertEqual(out['accNote'], 'Impossibile spegnere Tailscale: permission denied')
 
+    # --- scheda "Porta del pannello" ---------------------------------------------------------------
+    @staticmethod
+    def port_status(**port):
+        base = {'supported': True, 'current': 8443, 'min': 1024, 'max': 65535, 'pending': None}
+        base.update(port)
+        return status_body(port=base)
+
+    def test_port_card_shows_the_current_port_and_allows_a_change(self):
+        out = self.run_page(status=self.port_status())
+        self.assertEqual(out['port']['current'], '8443')
+        self.assertFalse(out['port']['applyDisabled'])
+        self.assertEqual(out['port']['msg'], '')
+        self.assertTrue(out['port']['box'])      # classe "hidden" attiva: nessun cambio in sospeso
+
+    def test_port_card_without_support_says_why_in_the_current_language(self):
+        status = self.port_status(supported=False, reason='Panel socket unit not recognised: automatic change blocked.')
+        out = self.run_page('it', status=status)
+        self.assertTrue(out['port']['applyDisabled'])
+        self.assertEqual(out['port']['msg'], 'Cambio di porta non disponibile: Unità socket del pannello non riconosciuta: cambio automatico bloccato.')
+        self.assertEqual(out['port']['msgClass'], 'netmessage err')
+
+    def test_pending_change_seen_from_the_old_port_has_no_confirm_button(self):
+        pending = {'id': 'a' * 14, 'old_port': 8443, 'new_port': 5000, 'expires_at': stamp('2026-11-18 12:02:00'), 'state': 'applied'}
+        out = self.run_page(status=self.port_status(pending=pending), port='8443')
+        self.assertFalse(out['port']['box'])
+        self.assertTrue(out['port']['confirmHidden'])
+        self.assertTrue(out['port']['applyDisabled'])
+        self.assertEqual(out['port']['address'], 'https://orangepizero.local:5000/')
+        self.assertEqual(out['port']['countdown'], '120 seconds')
+        self.assertIn('from port 8443 to port 5000', out['port']['text'])
+        self.assertIn('comes back to port 8443', out['port']['text'])
+
+    def test_pending_change_seen_from_the_new_port_can_be_confirmed(self):
+        pending = {'id': 'a' * 14, 'old_port': 8443, 'new_port': 5000, 'expires_at': stamp('2026-11-18 12:02:00'), 'state': 'applied'}
+        out = self.run_page(status=self.port_status(current=5000, pending=pending), port='5000',
+                            href='https://orangepizero.local:5000/')
+        self.assertFalse(out['port']['box'])
+        self.assertFalse(out['port']['confirmHidden'])
+        self.assertIn('make the change permanent', out['port']['text'])
+        self.assertEqual(out['port']['current'], '5000')
+
+    def test_confirm_posts_only_the_identifier_and_rereads_the_status(self):
+        pending = {'id': 'b' * 14, 'old_port': 8443, 'new_port': 5000, 'expires_at': stamp('2026-11-18 12:02:00'), 'state': 'applied'}
+        out = self.run_page(status=self.port_status(current=5000, pending=pending), port='5000', href='https://orangepizero.local:5000/',
+                            port_confirm=True, extra={'/api/port/confirm': {'body': {'ok': True, 'confirmed': True, 'port': 5000}}})
+        self.assertEqual(out['portConfirmSent'], {'id': 'b' * 14})
+        self.assertEqual(out['port']['msg'], 'Panel port confirmed: 5000.')
+        self.assertEqual(out['calls'].count('/api/status'), 2)
+
+    def test_invalid_ports_never_reach_the_server(self):
+        for value in ('', '80', '1023', '65536', 'abc', '5000.5', '-5000'):
+            with self.subTest(value=value):
+                out = self.run_page(status=self.port_status(), port_submit={'value': value})
+                self.assertNotIn('/api/port/start', out['calls'])
+                self.assertEqual(out['port']['msg'], 'Enter a whole number between 1024 and 65535.')
+                self.assertFalse(out['port']['applyDisabled'])
+
+    def test_declining_the_question_changes_nothing(self):
+        out = self.run_page(status=self.port_status(), port_submit={'value': '5000'}, confirm=False)
+        self.assertNotIn('/api/port/start', out['calls'])
+        self.assertEqual(out['later'], [])
+
+    def test_a_valid_port_is_sent_alone_and_the_page_then_moves_to_the_new_address(self):
+        started = {'ok': True, 'id': 'c' * 14, 'old_port': 8443, 'new_port': 5000, 'expires_at': stamp('2026-11-18 12:02:30')}
+        out = self.run_page(status=self.port_status(), port_submit={'value': '5000'}, flush_later=True,
+                            extra={'/api/port/start': {'body': started}})
+        self.assertEqual(out['portSent'], {'port': 5000})
+        self.assertIn('moves to port 5000', out['port']['msg'])
+        self.assertFalse(out['port']['box'])
+        self.assertTrue(out['port']['confirmHidden'], 'finche si e\' sulla vecchia porta non si conferma')
+        self.assertEqual(out['later'], [8000])
+        self.assertEqual(out['navigations'], ['https://orangepizero.local:5000/'])
+
+    def test_server_refusal_is_shown_translated_and_the_form_stays_usable(self):
+        refusal = {'ok': False, 'body': {'error': 'This port is already used by another service: choose another one.'}}
+        out = self.run_page('it', status=self.port_status(), port_submit={'value': '5000'}, extra={'/api/port/start': refusal})
+        self.assertEqual(out['port']['msg'], 'Questa porta è già usata da un altro servizio: scegline un’altra.')
+        self.assertFalse(out['port']['applyDisabled'])
+        self.assertEqual(out['navigations'], [])
+
+    def test_the_new_ethernet_address_follows_the_real_port(self):
+        network = {'supported': True, 'mode': 'static', 'ip': '192.168.1.60', 'prefix': 24, 'gateway': '192.168.1.1', 'dns': ['1.1.1.1'],
+                   'pending': {'id': 'd' * 14, 'mode': 'static', 'ip': '192.168.1.60', 'expires_at': stamp('2026-11-18 12:02:00'), 'state': 'applied'}}
+        out = self.run_page(status=status_body(network=network), port='5000', href='https://192.168.1.50:5000/')
+        self.assertEqual(out['netAddress'], 'https://192.168.1.60:5000')
+
     def test_the_key_field_is_left_untouched(self):
         self.assertNotIn("'accKey'", re.search(r"for\(const id of \['accName','accTagsIn'\]\)", dash_js()).group(0))
 
@@ -485,7 +580,7 @@ class StaticPageTests(unittest.TestCase):
 
     def test_python_messages_are_english(self):
         for name in ('tailscale_panel.py', 'tailscale_panel_helper.py', 'tailscale_panel_network.py', 'tailscale_panel_discovery.py',
-                     'tailscale_panel_auth.py', 'password_policy.py'):
+                     'tailscale_panel_auth.py', 'tailscale_panel_port.py', 'password_policy.py'):
             import ast
             tree = ast.parse((DIR / name).read_text(encoding='utf-8'))
             docs = set()
