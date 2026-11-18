@@ -41,4 +41,6 @@ fi
 
 sync
 say 'Verifica'
-sh ./check_installation.sh --fresh 2>&1 | grep -E 'ERRORE|DA VERIFICARE|VERIFICA' || true
+# Niente --fresh: quel controllo e' per una scheda appena installata (pretende policy iniziale con LAN spenta e zero host)
+# e su una scheda gia' in servizio, con rotte pubblicate, darebbe un falso errore.
+sh ./check_installation.sh 2>&1 | grep -E 'ERRORE|DA VERIFICARE|VERIFICA' || true

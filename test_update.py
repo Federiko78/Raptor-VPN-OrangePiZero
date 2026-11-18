@@ -63,6 +63,14 @@ class UpdateTests(unittest.TestCase):
         self.assertIn('[install_tailscale_panel.sh eseguito]', done.stdout)
         self.assertIn('[install_eventlog.sh eseguito]', done.stdout)
 
+    def test_final_check_is_not_the_fresh_board_one(self):
+        # --fresh pretende la policy iniziale (LAN spenta, zero host): su una scheda in servizio e' un falso errore.
+        (self.work / 'check_installation.sh').write_text('echo "VERIFICA args=[$*]"\n')
+        self.release('v2', 'main')
+        done = self.update()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn('VERIFICA args=[]', done.stdout)
+
     def test_normal_shallow_clone_updates(self):
         self.release('v2', 'main')
         self.assertEqual(self.update().returncode, 0)
