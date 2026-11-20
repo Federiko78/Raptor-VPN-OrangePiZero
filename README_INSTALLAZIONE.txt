@@ -1,10 +1,10 @@
-TAILSCALE CONTROL PANEL FACTORY R1.3.2 — WEB UI v1.5.0
-Leggere TAILSCALE_PANEL_FACTORY_R1_3_2_INSTALLAZIONE.md (Visual Studio Code).
-Installazione da Armbian pulito:
-  mkdir -p /root/tspanel-factory-r1.3.2
-  cd /root/tspanel-factory-r1.3.2
-  python3 -m zipfile -e /root/TAILSCALE_PANEL_FACTORY_R1_3_2.zip .
-  sh ./install_factory.sh
-Poi: collega Tailscale dal pannello (sezione Account Tailscale, vedi ACCOUNT_TAILSCALE.md) oppure con: tailscale up
-Prima configurazione: policy OFF, lista host vuota, nessuna rotta pubblicata.
-NON usare questo install_factory.sh per aggiornare una Orange Pi gia' configurata.
+RAPTOR VPN · ORANGE PI ZERO
+Le istruzioni di installazione e di aggiornamento stanno in README.md.
+
+Scheda nuova (Armbian Debian 13 Trixie Minimal, da root, in SSH):
+  curl -fsSL https://raw.githubusercontent.com/Federiko78/Raptor-VPN-OrangePiZero/main/bootstrap.sh | sh
+
+Scheda gia' installata (da root):
+  cd /root/Raptor-VPN-OrangePiZero && sh update.sh
+
+NON usare install_factory.sh ne' bootstrap.sh per aggiornare una Orange Pi gia' configurata.
