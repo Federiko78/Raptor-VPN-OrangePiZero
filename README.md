@@ -32,7 +32,7 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 2. Collega la scheda alla rete con il cavo Ethernet (serve Internet, con DHCP) e accendila.
 3. Primo accesso via SSH come `root`, password `1234`: Armbian chiede di cambiarla e di creare un utente.
 
-Collaudato con: `Armbian_community 26.11.0-trunk.130 trixie`, kernel `6.18.63-current-sunxi`. Servono almeno 450 MiB liberi (microSD da 16 GB o più).
+Collaudato con l'immagine `Armbian_community_26.11.0-trunk.130_Orangepizero_trixie_current_6.18.63_minimal` (Armbian community, Debian 13 trixie Minimal, kernel `6.18.63-current-sunxi`). Servono almeno 450 MiB liberi (microSD da 16 GB o più).
 
 ## Installazione (scheda nuova)
 
