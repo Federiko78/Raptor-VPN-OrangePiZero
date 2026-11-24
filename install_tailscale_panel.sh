@@ -73,24 +73,8 @@ if ! python3 -c 'import sys; assert sys.version_info >= (3,7)' ; then
   echo "ERRORE: Python 3.7 o superiore necessario." >&2; exit 1
 fi
 
-# --- attesa systemd ---
-# Subito dopo l'avvio o dopo apt la scheda puo' essere occupata e systemctl rispondere lentamente:
-# si riprova per circa 2 minuti e, se non risponde, si mostra il motivo vero (prima era nascosto).
-systemd_ready=no
-systemd_err=
-systemd_rc=0
-for systemd_try in 1 2 3 4 5 6; do
-  if systemd_err=$(timeout 15 systemctl list-units --no-pager 2>&1 >/dev/null); then
-    systemd_ready=yes
-    break
-  else
-    systemd_rc=$?
-  fi
-  [ "$systemd_try" -lt 6 ] || break
-  printf 'systemd occupato o lento (tentativo %s di 6): attendo...\n' "$systemd_try"
-  sleep 5
-done
-# --- fine attesa systemd ---
+. "$DIR/systemd_wait.sh"
+wait_for_systemd || true
 if [ "$systemd_ready" != yes ]; then
   [ "$systemd_rc" -ne 124 ] || systemd_err='nessuna risposta entro 15 secondi'
   printf '\nsystemctl: uscita %s, risposta: %s\n' "$systemd_rc" "${systemd_err:-nessuna}" >&2

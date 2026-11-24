@@ -11,7 +11,7 @@ die() { printf '\nERRORE: %s\n' "$*" >&2; exit 1; }
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$BASE"
 command -v python3 >/dev/null 2>&1 || die 'python3 mancante: eseguire  apt-get update && apt-get install -y python3  (oppure usare bootstrap.sh)'
-for f in install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py tailscale_panel_port.py password_policy.py panel_assets.py panel_i18n.py i18n/en.json i18n/it.json check_installation.sh backup_panel.sh restore_panel.sh; do
+for f in systemd_wait.sh install_tailscale_panel.sh install_access.sh install_eventlog.sh raptor_ap.py raptor_eventlog.py tailscale_panel.py tailscale_panel_helper.py tailscale_panel_network.py tailscale_panel_discovery.py tailscale_panel_auth.py tailscale_panel_port.py password_policy.py panel_assets.py panel_i18n.py i18n/en.json i18n/it.json check_installation.sh backup_panel.sh restore_panel.sh; do
   [ -s "$f" ] || die "File mancante nel pacchetto: $f"
 done
 if [ -f SHA256SUMS ]; then
@@ -30,7 +30,7 @@ done
 for lang_file in i18n/*.json; do
   python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$lang_file" || die "File lingua non valido: $lang_file"
 done
-for script in install_factory.sh install_tailscale_panel.sh install_access.sh install_eventlog.sh check_installation.sh backup_panel.sh restore_panel.sh; do
+for script in install_factory.sh systemd_wait.sh install_tailscale_panel.sh install_access.sh install_eventlog.sh check_installation.sh backup_panel.sh restore_panel.sh; do
   sh -n "$script" || die "Errore sintassi Shell: $script"
 done
 
@@ -41,29 +41,13 @@ say 'Prerequisiti Armbian Minimal / Orange Pi Zero'
 [ "$(dpkg --print-architecture)" = armhf ] || die 'La release Factory è stata collaudata logicamente per ARM32 armhf'
 [ "$(ps -p 1 -o comm= | tr -d ' ')" = systemd ] || die 'systemd non è il processo PID 1'
 command -v timeout >/dev/null 2>&1 || die 'Comando timeout non trovato'
-# --- attesa systemd ---
-# Subito dopo l'avvio o dopo apt la scheda puo' essere occupata e systemctl rispondere lentamente:
-# si riprova per circa 2 minuti e, se non risponde, si mostra il motivo vero (prima era nascosto).
-systemd_ready=no
-systemd_err=
-systemd_rc=0
-for systemd_try in 1 2 3 4 5 6; do
-  if systemd_err=$(timeout 15 systemctl list-units --no-pager 2>&1 >/dev/null); then
-    systemd_ready=yes
-    break
-  else
-    systemd_rc=$?
-  fi
-  [ "$systemd_try" -lt 6 ] || break
-  printf 'systemd occupato o lento (tentativo %s di 6): attendo...\n' "$systemd_try"
-  sleep 5
-done
-# --- fine attesa systemd ---
+. "$BASE/systemd_wait.sh"
+wait_for_systemd || true
 if [ "$systemd_ready" != yes ]; then
   [ "$systemd_rc" -ne 124 ] || systemd_err='nessuna risposta entro 15 secondi'
   printf '\nsystemctl: uscita %s, risposta: %s\n' "$systemd_rc" "${systemd_err:-nessuna}" >&2
   printf 'Stato di systemd: %s\n' "$(timeout 5 systemctl is-system-running 2>&1 || true)" >&2
-  die 'systemd non risponde; fermarsi e riparare il blocco console prima dell’installer'
+  die 'systemd non risponde nemmeno dopo l’attesa: riavviare la scheda (staccare e riattaccare l’alimentazione) e rilanciare lo stesso comando'
 fi
 [ -e /sys/class/net/end0 ] || die 'Interfaccia Ethernet end0 assente'
 [ -c /dev/net/tun ] || die '/dev/net/tun assente: verificare il kernel'
