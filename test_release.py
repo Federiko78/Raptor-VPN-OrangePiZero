@@ -135,6 +135,74 @@ class AppTests(unittest.TestCase):
         self.assertIsNotNone(p.password_error('abcdefghij12'))   # manca la maiuscola
         self.assertIsNotNone(p.password_error('Abcdefg1'))       # troppo corta (minimo 12)
 
+class SystemdWaitTests(unittest.TestCase):
+    """L'attesa di systemd negli installer: riprova, poi mostra il motivo vero."""
+    def setUp(self):
+        import tempfile
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(self.tmp, ignore_errors=True))
+        bin_ = self.tmp / 'bin'; bin_.mkdir()
+        (bin_ / 'sleep').write_text('#!/bin/sh\necho x >> "$LOG_DIR/sleeps"\n')
+        (bin_ / 'timeout').write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        (bin_ / 'systemctl').write_text(
+            '#!/bin/sh\n'
+            'echo x >> "$LOG_DIR/calls"\n'
+            'n=$(wc -l < "$LOG_DIR/calls")\n'
+            '[ "$n" -gt "$FAKE_FAILS" ] && exit 0\n'
+            'echo "$FAKE_ERROR" >&2\nexit "$FAKE_RC"\n')
+        for f in bin_.iterdir(): f.chmod(0o755)
+        self.bin = bin_
+
+    def snippet(self, script):
+        text = (DIR / script).read_text()
+        a = text.index('# --- attesa systemd ---'); b = text.index('# --- fine attesa systemd ---')
+        return text[a:b]
+
+    def run_loop(self, script, fails, rc=1, error='Failed to connect to bus'):
+        import os, subprocess
+        for f in ('calls', 'sleeps'): (self.tmp / f).write_text('')
+        code = 'set -eu\n' + self.snippet(script) + 'echo "ready=$systemd_ready rc=$systemd_rc err=$systemd_err"\n'
+        env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'], LOG_DIR=str(self.tmp),
+                   FAKE_FAILS=str(fails), FAKE_RC=str(rc), FAKE_ERROR=error)
+        out = subprocess.run(['sh', '-c', code], env=env, capture_output=True, text=True)
+        calls = len((self.tmp / 'calls').read_text().split())
+        return out, calls
+
+    def test_both_installers_wait_for_systemd_and_report_the_reason(self):
+        for script in ('install_factory.sh', 'install_tailscale_panel.sh'):
+            with self.subTest(script=script):
+                text = (DIR / script).read_text()
+                self.assertIn('[ "$systemd_ready" != yes ]', text)
+                self.assertIn('Stato di systemd', text)
+                self.assertNotIn('timeout 12 systemctl', text)
+                out, calls = self.run_loop(script, fails=0)
+                self.assertEqual((out.returncode, calls), (0, 1))
+                self.assertIn('ready=yes', out.stdout)
+
+    def test_a_busy_systemd_is_waited_for(self):
+        for script in ('install_factory.sh', 'install_tailscale_panel.sh'):
+            with self.subTest(script=script):
+                out, calls = self.run_loop(script, fails=3)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                self.assertIn('ready=yes', out.stdout)
+                self.assertEqual(calls, 4)
+                self.assertEqual(out.stdout.count('attendo'), 3)
+
+    def test_a_dead_systemd_gives_up_after_six_tries_and_keeps_the_error(self):
+        for script in ('install_factory.sh', 'install_tailscale_panel.sh'):
+            with self.subTest(script=script):
+                out, calls = self.run_loop(script, fails=99, rc=1, error='Failed to connect to bus')
+                self.assertEqual(calls, 6)
+                self.assertEqual(len((self.tmp / 'sleeps').read_text().split()), 5)
+                self.assertIn('ready=no rc=1 err=Failed to connect to bus', out.stdout)
+
+    def test_a_timeout_is_reported_as_no_answer(self):
+        text = (DIR / 'install_factory.sh').read_text()
+        self.assertIn('[ "$systemd_rc" -ne 124 ] || systemd_err=', text)
+        self.assertIn('nessuna risposta entro 15 secondi', text)
+        out, calls = self.run_loop('install_factory.sh', fails=99, rc=124, error='')
+        self.assertIn('ready=no rc=124', out.stdout)
+
 class PackageTests(unittest.TestCase):
     """update.sh e install_factory.sh rifiutano un pacchetto con SHA256SUMS non aggiornato: lo controlliamo qui."""
     def listed(self):
