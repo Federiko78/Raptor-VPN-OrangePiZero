@@ -26,7 +26,7 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 
 ## Installazione
 
-Serve: una **Orange Pi Zero**, una microSD da 16 GB o più (servono almeno 450 MiB liberi), un cavo Ethernet collegato a una rete con **DHCP e accesso a Internet** (di solito il router).
+Serve: una **Orange Pi Zero**, una microSD da **almeno 4 GB, meglio 8 GB o più** (con Armbian e il progetto installati si occupano circa 1,5 GB; servono almeno 450 MiB liberi al momento dell'installazione, più un margine per gli aggiornamenti), un cavo Ethernet collegato a una rete con **DHCP e accesso a Internet** (di solito il router).
 
 ### 1. Sistema operativo
 

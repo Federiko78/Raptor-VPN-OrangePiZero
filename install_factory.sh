@@ -59,7 +59,7 @@ FREE_MB=$(df -Pm / | awk 'NR==2 {print $4}')
 case "$FREE_MB" in ''|*[!0-9]*) die 'Impossibile misurare lo spazio libero';; esac
 printf 'Sistema: %s\nKernel: %s\nArchitettura: %s\nSpazio libero: %s MiB\n' "${PRETTY_NAME:-Debian}" "$(uname -r)" "$(dpkg --print-architecture)" "$FREE_MB"
 if [ "$FREE_MB" -lt 450 ]; then
-  die 'Spazio insufficiente (<450 MiB). Usare preferibilmente una microSD da almeno 16 GB.'
+  die 'Spazio insufficiente (<450 MiB). Usare una microSD da almeno 4 GB, meglio 8 GB o più.'
 fi
 if [ ! -f /etc/netplan/10-dhcp-all-interfaces.yaml ]; then
   echo 'AVVISO: manca il Netplan DHCP standard Armbian. Il pannello potrebbe inibire la modifica IP per sicurezza.' >&2

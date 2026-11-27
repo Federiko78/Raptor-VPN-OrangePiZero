@@ -43,7 +43,7 @@ La Factory **non include** alcun indirizzo IP di prova, password esistente, prof
 ## Requisiti e primo accesso Armbian
 
 - Orange Pi Zero originale con Armbian Debian 13 Trixie Minimal (`armhf`) e Ethernet `end0`.
-- Consigliata microSD da **16 GB o più**, almeno 450 MiB disponibili al preflight.
+- microSD da **almeno 4 GB, meglio 8 GB o più**: almeno 450 MiB disponibili al preflight (misurato su una microSD da 8 GB con Armbian Minimal e il progetto installati: 1,5 GB usati e 5,7 GB liberi; su una da 4 GB, circa 3,6 GB utilizzabili, ne restano circa 2 GB: è una stima).
 - Internet temporaneo per apt/Tailscale; servizio systemd e interfaccia TUN funzionanti.
 - Al primo login Armbian, salvo configurazione preventiva tramite Imager: **utente `root`, password iniziale `1234`**. Il sistema chiede di cambiare questa password e creare un utente amministrativo. Completare la procedura prima dell'installer.
 
