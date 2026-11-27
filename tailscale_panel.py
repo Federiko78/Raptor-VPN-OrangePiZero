@@ -346,7 +346,9 @@ def status_data():
             settings['advertise'] = bool(actual)
             result['cli_read_ok'] = True
             if not actual:
-                settings['mode'] = 'off'
+                # Il modo alias non pubblica nessuna rotta: lo ricorda lo stato salvato dopo l'ultima applicazione riuscita.
+                if not (settings.get('mode') == 'alias' and len(settings.get('selected_hosts') or []) == 1):
+                    settings['mode'] = 'off'
             elif all(r.endswith('/32') for r in actual):
                 settings['mode'] = 'selected'
                 settings['selected_hosts'] = [r.rsplit('/',1)[0] for r in actual]
@@ -613,8 +615,10 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 <form id="settings"><strong>[[routes.mode]]</strong>
 <div class="radioopts"><label><input name="routeMode" type="radio" id="routeOff" value="off" checked> [[routes.off]]</label>
 <label><input name="routeMode" type="radio" id="routeAll" value="all"> [[routes.all]]</label>
-<label><input name="routeMode" type="radio" id="routeSelected" value="selected"> [[routes.selected]]</label></div>
-<div class="field"><label for="subnets">[[routes.subnets]]</label><input id="subnets" type="text" spellcheck="false" placeholder="192.168.1.0/24"><small>[[routes.subnets_help]]</small></div>
+<label><input name="routeMode" type="radio" id="routeSelected" value="selected"> [[routes.selected]]</label>
+<label><input name="routeMode" type="radio" id="routeAlias" value="alias"> [[routes.alias]]</label></div>
+<div id="aliasBox" class="notice hidden"><p>[[routes.alias_help]]</p><p><strong>[[routes.alias_use]]</strong> <span class="value" id="aliasIp">-</span></p></div>
+<div class="field" id="subnetsField"><label for="subnets">[[routes.subnets]]</label><input id="subnets" type="text" spellcheck="false" placeholder="192.168.1.0/24"><small>[[routes.subnets_help]]</small></div>
 <div class="tgl"><div><strong>[[routes.snat]]</strong><span>[[routes.snat_help]]</span></div><input class="switch" id="snat" type="checkbox" aria-label="SNAT"></div>
 <div class="tgl"><div><strong>[[routes.accept]]</strong><span>[[routes.accept_help]]</span></div><input class="switch" id="accept_routes" type="checkbox" aria-label="{{routes.accept}}"></div>
 <div class="tgl"><div><strong>[[routes.dns]]</strong><span>[[routes.dns_help]]</span></div><input class="switch" id="accept_dns" type="checkbox" aria-label="{{routes.dns}}"></div>
@@ -706,9 +710,19 @@ function S(m){
 function plural(n,key){return T(key+(n===1?'_one':'_other'));}
 const $ = id => document.getElementById(id);
 const boolFields = ['snat','accept_routes','accept_dns','auto_update'];
+const ROUTE_IDS = {off:'routeOff', all:'routeAll', selected:'routeSelected', alias:'routeAlias'};
+function routeMode(){return $('routeAlias').checked?'alias':$('routeAll').checked?'all':$('routeSelected').checked?'selected':'off';}
+function showRouteMode(){
+ const alias=routeMode()==='alias';
+ $('aliasBox').classList.toggle('hidden',!alias);
+ $('subnetsField').classList.toggle('hidden',alias);
+ $('aliasIp').textContent=tsIp4;
+}
+Object.values(ROUTE_IDS).forEach(id=>{$(id).onchange=showRouteMode;});
 let selectedHosts = new Set();
 let discovered = [];
 let initialMode = 'off';
+let tsIp4 = '-';
 let detectedSubnet = '';
 let first = true;
 async function refresh(){
@@ -718,6 +732,7 @@ async function refresh(){
   renderAccount(data);
   $('tailnet').textContent=data.tailnet;
   $('tsip').textContent=data.tailscale_ip; $('hostname').textContent=data.hostname;
+  tsIp4=(String(data.tailscale_ip||'').split(',').map(x=>x.trim()).find(x=>/^\d{1,3}(\.\d{1,3}){3}$/.test(x)))||'-';
   $('lanip').textContent=data.lan.ip; $('interface').textContent=data.lan.device;
   detectedSubnet=data.lan.subnet||'';
   $('detected').textContent=detectedSubnet||T('info.not_detected');
@@ -730,11 +745,12 @@ async function refresh(){
   if(first){
     boolFields.forEach(id=>$(id).checked=!!s[id]);
     $('subnets').value=s.subnets||data.lan.subnet;
-    initialMode=['off','all','selected'].includes(s.mode)?s.mode:'off';
-    $(initialMode==='all'?'routeAll':initialMode==='selected'?'routeSelected':'routeOff').checked=true;
+    initialMode=['off','all','selected','alias'].includes(s.mode)?s.mode:'off';
+    $(ROUTE_IDS[initialMode]).checked=true;
     selectedHosts=new Set(Array.isArray(s.selected_hosts)?s.selected_hosts:[]);
     renderDevices();first=false;
   }
+  showRouteMode();
   netData(data.network,data.lan);
   portData(data.port);
   ethNow(data);
@@ -746,13 +762,15 @@ function msg(t,error){$('message').textContent=t;$('message').className=error?'e
 $('settings').addEventListener('submit',async e=>{
  e.preventDefault();$('save').disabled=true;msg(T('routes.applying'),false);
  const payload=Object.fromEntries(boolFields.map(id=>[id,$(id).checked]));
- payload.mode=$('routeAll').checked?'all':$('routeSelected').checked?'selected':'off';
+ payload.mode=routeMode();
  payload.subnets=$('subnets').value.trim();payload.selected_hosts=[...selectedHosts];
  if(payload.mode==='selected' && !payload.selected_hosts.length){msg(T('routes.pick_one'),true);$('save').disabled=false;return;}
+ if(payload.mode==='alias' && payload.selected_hosts.length!==1){msg(T('routes.alias_one'),true);$('save').disabled=false;return;}
  try {const response=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(payload)});
  const result=await response.json();if(!response.ok)throw Error(S(result.error)||T('routes.unspecified'));
- msg(T('routes.applied'),false);
+ const aliasOn=payload.mode==='alias';
  first=true;await refresh();
+ msg(aliasOn?T('routes.applied_alias',{ip:tsIp4}):T('routes.applied'),false);
  }catch(error){msg(error.message,true)}finally{$('save').disabled=false;}
 });
 function renderDevices(){
@@ -763,7 +781,10 @@ function renderDevices(){
  for(const d of rows){
    const row=document.createElement('label');row.className='device';
    const check=document.createElement('input');check.type='checkbox';check.checked=selectedHosts.has(d.ip);
-   check.addEventListener('change',()=>{if(check.checked)selectedHosts.add(d.ip);else selectedHosts.delete(d.ip);renderScanMeta();});
+   check.addEventListener('change',()=>{
+     if(check.checked){if(routeMode()==='alias')selectedHosts.clear();selectedHosts.add(d.ip);}else selectedHosts.delete(d.ip);
+     if(routeMode()==='alias')renderDevices();else renderScanMeta();
+   });
    const info=document.createElement('div');info.className='deviceinfo';
    const title=document.createElement('strong');title.textContent=d.hostname&&d.hostname!=='-'?d.hostname:T('lan.device');
    const address=document.createElement('small');address.textContent=T('lan.ipmac',{ip:d.ip,mac:d.mac||'-'});

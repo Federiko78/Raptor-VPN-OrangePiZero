@@ -104,7 +104,7 @@ else
   line 'Blocco IPv6 Tailscale -> LAN' 'ERRORE (filtro assente)'; ok=0
 fi
 if [ -r /var/lib/tailscale-panel-guard/policy.json ]; then
-  if python3 -c 'import json; d=json.load(open("/var/lib/tailscale-panel-guard/policy.json")); assert d.get("mode") in ("off", "selected", "all")' 2>/dev/null; then
+  if python3 -c 'import json; d=json.load(open("/var/lib/tailscale-panel-guard/policy.json")); assert d.get("mode") in ("off", "selected", "all", "alias")' 2>/dev/null; then
     line 'Policy persistente' 'OK'
   else
     line 'Policy persistente' 'ERRORE (policy non valida)'; ok=0

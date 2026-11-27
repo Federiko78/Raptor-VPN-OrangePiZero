@@ -5,6 +5,11 @@ Only accepts a fixed JSON schema over stdin, with no argv (except --restore
 when launched directly by a root-owned systemd oneshot). No shell execution.
 The firewall guard filters FORWARDED IPv4 packets from tailscale0 to Ethernet;
 it does not replace tailnet grants/ACLs or control other subnet routers.
+
+Mode "alias": no route is published at all. Everything that reaches the Orange Pi's
+own Tailscale address is forwarded (DNAT) to ONE LAN device, which therefore appears
+to the tailnet under the Pi's 100.x address. The LAN address of the device never
+leaves the customer's network, so it cannot clash with the addresses of the remote site.
 """
 import fcntl
 import ipaddress
@@ -22,10 +27,14 @@ LOCK = BASE + '/lock'
 INTERFACE_FILE = '/etc/tailscale-panel-lan.conf'
 CHAIN_A = 'TSPANEL_M_A'
 CHAIN_B = 'TSPANEL_M_B'
+CHAIN_ALIAS_PRE = 'TSPANEL_ALIAS_PRE'
+CHAIN_ALIAS_POST = 'TSPANEL_ALIAS_POST'
+TAILNET = '100.64.0.0/10'
 MAX_SELECTED = 64
 RFC1918 = [ipaddress.ip_network(c) for c in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
 BOOLEAN_KEYS = ('snat', 'accept_routes', 'accept_dns', 'auto_update')
 EXPECTED = {'mode', 'subnets', 'selected_hosts', *BOOLEAN_KEYS}
+MODES = ('off', 'all', 'selected', 'alias')
 
 
 def run(argv, timeout=20, check=True):
@@ -103,7 +112,7 @@ def validate_selected(values, local, network):
 def validate(data):
     if not isinstance(data, dict) or set(data) != EXPECTED:
         raise ValueError('Parameters not allowed')
-    if data['mode'] not in ('off', 'all', 'selected'):
+    if data['mode'] not in MODES:
         raise ValueError('Invalid mode')
     for key in BOOLEAN_KEYS:
         if type(data[key]) is not bool:
@@ -119,11 +128,13 @@ def validate(data):
     if not isinstance(raw_hosts, list) or len(raw_hosts) > MAX_SELECTED or not all(
             isinstance(v, str) and len(v) <= 15 for v in raw_hosts):
         raise ValueError('Invalid device list (maximum 64 IPs)')
-    selected = validate_selected(raw_hosts, local, net) if data['mode'] == 'selected' else []
+    selected = validate_selected(raw_hosts, local, net) if data['mode'] in ('selected', 'alias') else []
     if data['mode'] == 'all' and not networks:
         raise ValueError('Enter a subnet to publish')
     if data['mode'] == 'selected' and not selected:
         raise ValueError('Select at least one device')
+    if data['mode'] == 'alias' and len(selected) != 1:
+        raise ValueError('Choose exactly one device for the Tailscale alias')
     # Scan/selected mode operates only on the directly connected local subnet.
     return {'mode': data['mode'], 'subnets': ', '.join(networks),
             'selected_hosts': selected, **{key:data[key] for key in BOOLEAN_KEYS}}, dev
@@ -138,7 +149,7 @@ def read_policy():
     try:
         with open(POLICY, encoding='utf-8') as fd:
             data = json.load(fd)
-        if not isinstance(data, dict) or data.get('mode') not in ('off','all','selected'):
+        if not isinstance(data, dict) or data.get('mode') not in MODES:
             return {'mode':'off','subnets':'','selected_hosts':[]}
         return data
     except (OSError, ValueError):
@@ -226,7 +237,7 @@ def apply_guard(mode, selected, interface, subnets=''):
     if result.returncode not in (0,1):
         raise RuntimeError('Unable to create the mangle chain')
     ipt('-F', target)
-    if mode == 'selected':
+    if mode in ('selected', 'alias'):
         for address in selected:
             ipt('-A', target, '-d', address + '/32', '-j', 'RETURN')
     elif mode == 'all':
@@ -244,8 +255,74 @@ def apply_guard(mode, selected, interface, subnets=''):
         raise RuntimeError('Unable to verify the mangle filter')
 
 
+def ipt_nat(*args, check=True):
+    return run(['/usr/sbin/iptables', '-w', '5', '-t', 'nat', *args], timeout=12, check=check)
+
+
+def alias_jumps(hook):
+    """Rules of a nat hook chain that jump to the alias chains (as iptables -S prints them)."""
+    rules = []
+    for line in ipt_nat('-S', hook).stdout.splitlines():
+        tokens = shlex.split(line)
+        if tokens[:2] == ['-A', hook] and '-j' in tokens and tokens[tokens.index('-j') + 1] in (CHAIN_ALIAS_PRE, CHAIN_ALIAS_POST):
+            rules.append(tokens[2:])
+    return rules
+
+
+def alias_chain(chain):
+    if ipt_nat('-S', chain, check=False).returncode != 0:
+        ipt_nat('-N', chain)
+    ipt_nat('-F', chain)
+
+
+def alias_jump(hook, wanted):
+    """Make `wanted` the only jump to an alias chain in the hook; the new one is added before removing old ones."""
+    if wanted not in alias_jumps(hook):
+        ipt_nat('-I', hook, '1', *wanted)
+    for rule in alias_jumps(hook):
+        if rule != wanted:
+            ipt_nat('-D', hook, *rule)
+    if alias_jumps(hook) != [wanted]:
+        raise RuntimeError('Unable to verify the alias rules')
+
+
+def apply_alias(host, interface):
+    """Forward everything sent to the Pi's own Tailscale address to `host`, and nothing else.
+
+    Called AFTER the mangle guard, which already lets only `host` through to the LAN.
+    DNAT matches the Pi's local addresses on tailscale0 (so a changed Tailscale address
+    needs nothing); the MASQUERADE makes the device answer to the Pi whatever the
+    "snat" setting says, because the device does not know the 100.x network.
+    """
+    ipaddress.IPv4Address(host)
+    alias_chain(CHAIN_ALIAS_PRE)
+    ipt_nat('-A', CHAIN_ALIAS_PRE, '-m', 'addrtype', '--dst-type', 'LOCAL', '-j', 'DNAT', '--to-destination', host)
+    alias_chain(CHAIN_ALIAS_POST)
+    ipt_nat('-A', CHAIN_ALIAS_POST, '-s', TAILNET, '-d', host + '/32', '-j', 'MASQUERADE')
+    alias_jump('PREROUTING', ['-i', 'tailscale0', '-j', CHAIN_ALIAS_PRE])
+    alias_jump('POSTROUTING', ['-o', interface, '-j', CHAIN_ALIAS_POST])
+
+
+def clear_alias():
+    """Remove every alias rule (jumps first, then the chains). Nothing to do if there never was one."""
+    for hook in ('PREROUTING', 'POSTROUTING'):
+        for rule in alias_jumps(hook):
+            ipt_nat('-D', hook, *rule)
+    for chain in (CHAIN_ALIAS_PRE, CHAIN_ALIAS_POST):
+        if ipt_nat('-S', chain, check=False).returncode == 0:
+            ipt_nat('-F', chain)
+            ipt_nat('-X', chain)
+
+
+def apply_nat(mode, selected, interface):
+    if mode == 'alias' and len(selected) == 1:
+        apply_alias(selected[0], interface)
+    else:
+        clear_alias()
+
+
 def active_routes(data):
-    if data['mode'] == 'off':
+    if data['mode'] in ('off', 'alias'):
         return ''
     if data['mode'] == 'selected':
         return ','.join(ip+'/32' for ip in data['selected_hosts'])
@@ -291,10 +368,12 @@ def main():
                 try:
                     dev, local, network = current_lan()
                     # On a new customer LAN, never authorize the old LAN.
-                    if previous.get('mode') == 'selected':
+                    if previous.get('mode') in ('selected', 'alias'):
                         saved = previous.get('selected_hosts', [])
                         hosts = validate_selected(saved, local, network)
-                        mode = 'selected' if hosts and len(hosts) == len(saved) else 'off'
+                        wanted = 1 if previous['mode'] == 'alias' else None
+                        ok = bool(hosts) and len(hosts) == len(saved) and (wanted is None or len(hosts) == wanted)
+                        mode = previous['mode'] if ok else 'off'
                     elif previous.get('mode') == 'all':
                         routes = validate_networks(previous.get('subnets',''))
                         mode = 'all' if any(local in ipaddress.IPv4Network(route) for route in routes) else 'off'
@@ -303,6 +382,12 @@ def main():
                     if attempt < 15: time.sleep(1)
             if mode != 'off':
                 apply_guard(mode, hosts, dev, previous.get('subnets', ''))
+            try:
+                apply_nat(mode, hosts if mode == 'alias' else [], dev)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError):
+                if mode == 'alias':  # without the forward the alias would silently do nothing: stay closed
+                    apply_guard('off', [], dev)
+                    mode = 'off'
             if fresh:  # Capture previously running R1.2 policy before reboot.
                 save_policy(previous)
             return print(json.dumps({'ok':True,'guard_mode':mode}))
@@ -314,11 +399,13 @@ def main():
         save_policy(data)
         try:
             apply_guard(data['mode'], data['selected_hosts'], dev, data['subnets'])
+            apply_nat(data['mode'], data['selected_hosts'], dev)
             apply_tailscale(data)
         except (RuntimeError, subprocess.TimeoutExpired, OSError, ValueError) as err:
             try:
                 save_policy(previous)
                 apply_guard(previous.get('mode','off'), previous.get('selected_hosts',[]), dev, previous.get('subnets',''))
+                apply_nat(previous.get('mode','off'), previous.get('selected_hosts',[]), dev)
                 apply_tailscale({**data, **previous})
             except Exception:
                 pass  # Prefer an existing restrictive guard to removing it.

@@ -254,6 +254,18 @@ const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
  out.port={current:txt('portCurrent'),applyDisabled:E('applyPort').disabled,msg:txt('portMessage'),msgClass:E('portMessage').className,
   box:E('portPendingBox').classList.state.hidden,confirmHidden:E('confirmPort').classList.state.hidden,text:txt('portPendingText'),
   address:txt('portNewAddress'),href:E('portNewAddress').href,countdown:txt('portCountdown')};
+ if(cfg.routes){const R=cfg.routes,wait=()=>new Promise(r=>setTimeout(r,40)),ids={off:'routeOff',all:'routeAll',selected:'routeSelected',alias:'routeAlias'};
+  if(R.scan){await E('scanLan').handlers.click();await wait();}
+  if(R.mode){for(const id of Object.values(ids))E(id).checked=false;E(ids[R.mode]).checked=true;E(ids[R.mode]).onchange();}
+  for(const ip of R.pick||[]){const row=E('deviceList').children.find(r=>r.children[1].children[1].textContent.includes(ip));
+   row.children[0].checked=true;row.children[0].handlers.change();await wait();}
+  if(R.uncheck){const row=E('deviceList').children.find(r=>r.children[1].children[1].textContent.includes(R.uncheck));
+   row.children[0].checked=false;row.children[0].handlers.change();await wait();}
+  out.routesChecked=E('deviceList').children.map(r=>r.children[0].checked);
+  if(R.save){await E('settings').handlers.submit({preventDefault(){}});await wait();}}
+ out.routes={aliasHidden:E('aliasBox').classList.state.hidden,subnetsHidden:E('subnetsField').classList.state.hidden,aliasIp:txt('aliasIp'),
+  checked:Object.fromEntries(['routeOff','routeAll','routeSelected','routeAlias'].map(k=>[k,E(k).checked])),sent:bodies['/api/apply'],
+  message:txt('message'),messageClass:E('message').className,meta:txt('scanMeta')};
  out.netAddress=txt('newAddress');
  out.eth={ip:txt('ethIp'),mode:txt('ethMode'),url:txt('ethUrl'),href:E('ethUrl').href};
  if(cfg.messages)out.translated=cfg.messages.map(m=>vm.runInContext('S('+JSON.stringify(m)+')',ctx));
@@ -554,6 +566,73 @@ class JavaScriptRuntimeTests(unittest.TestCase):
     def test_without_port_information_the_address_uses_the_port_of_the_page(self):
         out = self.run_page(status=status_body(), port='7777', href='https://192.168.1.50:7777/')
         self.assertEqual(out['eth']['url'], 'https://192.168.1.50:7777/')
+
+    # --- alias Tailscale -----------------------------------------------------------------------
+    SCAN = {'/api/scan': {'body': {'devices': [
+        {'ip': '192.168.1.64', 'hostname': 'nvr-camion', 'mac': 'aa:bb:cc:00:00:64', 'vendor': 'Hikvision'},
+        {'ip': '192.168.1.65', 'hostname': 'nas', 'mac': 'aa:bb:cc:00:00:65', 'vendor': 'Synology'}], 'subnet': '192.168.1.0/24'}},
+        '/api/apply': {'body': {'ok': True, 'result': {}}}}
+
+    def alias_status(self, mode='alias', hosts=('192.168.1.64',), ip='100.64.0.7'):
+        body = status_body(tailscale_ip=ip)
+        body['settings'] = dict(body['settings'], mode=mode, selected_hosts=list(hosts))
+        return body
+
+    def test_alias_mode_shows_the_tailscale_address_and_hides_the_subnet_field(self):
+        out = self.run_page(status=self.alias_status(), routes={})
+        r = out['routes']
+        self.assertTrue(r['checked']['routeAlias'])
+        self.assertEqual((r['aliasHidden'], r['subnetsHidden'], r['aliasIp']), (False, True, '100.64.0.7'))
+
+    def test_other_modes_hide_the_alias_box_and_keep_the_subnet_field(self):
+        for mode in ('off', 'all', 'selected'):
+            with self.subTest(mode=mode):
+                r = self.run_page(status=self.alias_status(mode=mode, hosts=()), routes={})['routes']
+                self.assertEqual((r['aliasHidden'], r['subnetsHidden']), (True, False))
+                self.assertFalse(r['checked']['routeAlias'])
+
+    def test_the_alias_address_is_the_ipv4_one_whatever_the_order(self):
+        for given, shown in (('100.101.102.103, fd7a:115c:a1e0::1', '100.101.102.103'), ('fd7a:115c:a1e0::1, 100.101.102.103', '100.101.102.103'),
+                             ('-', '-'), ('fd7a:115c:a1e0::1', '-')):
+            with self.subTest(given=given):
+                self.assertEqual(self.run_page(status=self.alias_status(ip=given), routes={})['routes']['aliasIp'], shown)
+
+    def test_switching_the_radio_toggles_the_alias_box(self):
+        on = self.run_page(routes={'mode': 'alias'})['routes']
+        off = self.run_page(status=self.alias_status(), routes={'mode': 'selected'})['routes']
+        self.assertEqual((on['aliasHidden'], on['subnetsHidden']), (False, True))
+        self.assertEqual((off['aliasHidden'], off['subnetsHidden']), (True, False))
+
+    def test_in_alias_mode_choosing_a_device_replaces_the_previous_choice(self):
+        out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'alias', 'pick': ['192.168.1.64', '192.168.1.65']})
+        self.assertEqual(out['routesChecked'], [False, True])
+
+    def test_in_selected_mode_several_devices_can_be_chosen(self):
+        out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'selected', 'pick': ['192.168.1.64', '192.168.1.65']})
+        self.assertEqual(out['routesChecked'], [True, True])
+
+    def test_alias_is_saved_with_exactly_one_device(self):
+        out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'alias', 'pick': ['192.168.1.64'], 'save': True})
+        self.assertEqual(out['routes']['sent']['mode'], 'alias')
+        self.assertEqual(out['routes']['sent']['selected_hosts'], ['192.168.1.64'])
+        self.assertEqual(out['routes']['message'], 'Alias active. From the remote PC open 100.64.0.7. No route needs approval.')
+        self.assertEqual(out['routes']['messageClass'], 'ok')
+        it = self.run_page('it', extra=self.SCAN, routes={'scan': True, 'mode': 'alias', 'pick': ['192.168.1.64'], 'save': True})
+        self.assertEqual(it['routes']['message'], 'Alias attivo. Dal PC remoto apri 100.64.0.7. Nessuna rotta da approvare.')
+
+    def test_alias_needs_exactly_one_device_and_sends_nothing_otherwise(self):
+        none = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'alias', 'save': True})['routes']
+        two = self.run_page(status=self.alias_status(hosts=('192.168.1.64', '192.168.1.65')), extra=self.SCAN, routes={'save': True})['routes']
+        for r in (none, two):
+            self.assertIsNone(r.get('sent'))
+            self.assertEqual((r['message'], r['messageClass']), ('In alias mode choose exactly one device from the LAN scan.', 'err'))
+
+    def test_the_other_modes_keep_their_messages(self):
+        out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'selected', 'pick': ['192.168.1.64'], 'save': True})['routes']
+        self.assertEqual(out['sent']['mode'], 'selected')
+        self.assertEqual(out['message'], 'Settings applied. Check the routes in the Tailscale admin panel.')
+        none = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'selected', 'save': True})['routes']
+        self.assertEqual(none['message'], 'Select at least one device from the LAN scan.')
 
     def test_the_new_ethernet_address_follows_the_real_port(self):
         network = {'supported': True, 'mode': 'static', 'ip': '192.168.1.60', 'prefix': 24, 'gateway': '192.168.1.1', 'dns': ['1.1.1.1'],

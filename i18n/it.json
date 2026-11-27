@@ -93,6 +93,11 @@
   "routes.mismatch": "Attenzione: la rete pubblicata non coincide con la LAN corrente. Verifica prima di salvare.",
   "routes.applying": "Applicazione in corso...",
   "routes.pick_one": "Seleziona almeno un dispositivo dalla scansione LAN.",
+  "routes.alias": "Alias Tailscale (un solo dispositivo, nessuna rotta)",
+  "routes.alias_help": "Non viene pubblicata nessuna rotta. Tutto quello che arriva all’indirizzo Tailscale di questa Orange Pi viene inoltrato al solo dispositivo scelto qui sotto, che resta nascosto dietro di essa. Il suo indirizzo della LAN non arriva mai alla sede remota, quindi non può andare in conflitto con gli indirizzi usati là. L’Orange Pi in sé non è più raggiungibile tramite Tailscale.",
+  "routes.alias_use": "Indirizzo da aprire dal PC remoto:",
+  "routes.alias_one": "In modalità alias scegli esattamente un dispositivo dalla scansione LAN.",
+  "routes.applied_alias": "Alias attivo. Dal PC remoto apri {ip}. Nessuna rotta da approvare.",
   "routes.unspecified": "Errore non specificato",
   "routes.applied": "Impostazioni applicate. Controlla le rotte nel pannello Tailscale.",
   "info.title": "Stato e informazioni",
@@ -388,6 +393,7 @@
   "Invalid port request.": "Richiesta porta non valida.",
   "Invalid port fields.": "Campi porta non validi.",
   "Port error": "Errore porta",
-  "Port management not available": "Gestione della porta non disponibile"
+  "Port management not available": "Gestione della porta non disponibile",
+  "Choose exactly one device for the Tailscale alias": "Per l’alias Tailscale scegli esattamente un dispositivo."
  }
 }

@@ -92,6 +92,267 @@ class RoutesTests(unittest.TestCase):
         with patch.object(r,'read_policy',return_value={'mode':'off','subnets':'','selected_hosts':[]}):
             self.assertEqual(r.read_policy()['mode'],'off')
 
+class FakeNat:
+    """Tabella nat di iptables, quanto basta: stessi comandi e stesso comportamento di errore del programma vero."""
+    def __init__(self):
+        self.chains = {'PREROUTING': [], 'POSTROUTING': []}
+        self.builtin = {'PREROUTING', 'POSTROUTING'}
+        self.log = []
+        self.ignore_insert = False
+
+    def __call__(self, *args, check=True):
+        import types
+        args = list(args); self.log.append(args)
+        op, chain, rest = args[0], args[1], args[2:]
+        rc, out = 0, ''
+        if op == '-S':
+            if chain not in self.chains: rc = 1
+            else:
+                out = '\n'.join((['-P %s ACCEPT' % chain] if chain in self.builtin else ['-N ' + chain]) +
+                                ['-A %s %s' % (chain, ' '.join(rule)) for rule in self.chains[chain]]) + '\n'
+        elif op == '-N':
+            if chain in self.chains: rc = 1
+            else: self.chains[chain] = []
+        elif op in ('-F', '-X'):
+            if chain not in self.chains: rc = 1
+            elif op == '-F': self.chains[chain] = []
+            else: del self.chains[chain]
+        elif op == '-A':
+            self.chains[chain].append(rest)
+        elif op == '-I':
+            if not self.ignore_insert: self.chains[chain].insert(int(rest[0]) - 1, rest[1:])
+        elif op == '-D':
+            if rest in self.chains[chain]: self.chains[chain].remove(rest)
+            else: rc = 1
+        else:
+            raise AssertionError('comando iptables non previsto: %s' % args)
+        if rc and check: raise RuntimeError('iptables ha risposto %d' % rc)
+        return types.SimpleNamespace(returncode=rc, stdout=out, stderr='')
+
+    def rules(self, chain):
+        return [' '.join(rule) for rule in self.chains.get(chain, [])]
+
+
+class AliasTests(unittest.TestCase):
+    HOST = '192.168.1.64'
+    PAYLOAD = {'mode': 'alias', 'subnets': '', 'selected_hosts': [HOST], 'snat': True, 'accept_routes': False,
+               'accept_dns': True, 'auto_update': True}
+
+    def setUp(self):
+        import tempfile, shutil
+        self.lan = patch.object(r, 'current_lan', return_value=('end0', ipaddress.IPv4Address('192.168.1.200'), ipaddress.IPv4Network('192.168.1.0/24')))
+        self.lan.start(); self.addCleanup(self.lan.stop)
+        self.tmp = pathlib.Path(tempfile.mkdtemp()); self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        self.paths = [patch.object(r, 'BASE', str(self.tmp)), patch.object(r, 'LOCK', str(self.tmp / 'lock')),
+                      patch.object(r, 'POLICY', str(self.tmp / 'policy.json'))]
+        for x in self.paths: x.start(); self.addCleanup(x.stop)
+        self.nat = FakeNat()
+        patcher = patch.object(r, 'ipt_nat', self.nat); patcher.start(); self.addCleanup(patcher.stop)
+
+    # --- validazione e rotte --------------------------------------------------------------------
+    def test_alias_takes_exactly_one_lan_device_and_publishes_no_route(self):
+        payload, dev = r.validate(self.PAYLOAD)
+        self.assertEqual((payload['mode'], payload['selected_hosts'], dev), ('alias', [self.HOST], 'end0'))
+        self.assertEqual(r.active_routes(payload), '')
+
+    def test_alias_with_zero_two_or_foreign_devices_is_rejected(self):
+        for hosts in ([], [self.HOST, '192.168.1.65'], ['192.168.2.10'], ['192.168.1.200'], ['192.168.1.255'], ['8.8.8.8'], ['x']):
+            with self.subTest(hosts=hosts):
+                with self.assertRaises(ValueError): r.validate(dict(self.PAYLOAD, selected_hosts=hosts))
+
+    def test_alias_is_a_known_mode_everywhere(self):
+        self.assertIn('alias', r.MODES)
+        (self.tmp / 'policy.json').write_text(json.dumps({'mode': 'alias', 'subnets': '', 'selected_hosts': [self.HOST]}))
+        self.assertEqual(r.read_policy()['mode'], 'alias')
+        self.assertIn('"alias"', DIR.joinpath('check_installation.sh').read_text())
+
+    def test_alias_publishes_an_empty_route_list_to_tailscale(self):
+        with patch.object(r, 'run') as run:
+            r.apply_tailscale(r.validate(self.PAYLOAD)[0])
+        self.assertIn('--advertise-routes=', run.call_args[0][0])
+
+    def test_guard_lets_only_the_alias_device_reach_the_lan(self):
+        rules = []
+        def fake_ipt(*args, check=True):
+            rules.append(args)
+            class O: returncode = 0
+            return O()
+        new, old = ['-i', 'tailscale0', '-o', 'end0', '-j', r.CHAIN_A], ['-i', 'tailscale0', '-o', 'end0', '-j', r.CHAIN_B]
+        with patch.object(r, 'fwd_rules', side_effect=[[], [new, old], [new]]), patch.object(r, 'ipt', side_effect=fake_ipt), patch.object(r, 'guard_ip6'):
+            r.apply_guard('alias', [self.HOST], 'end0')
+        self.assertEqual([x for x in rules if 'RETURN' in x], [('-A', r.CHAIN_A, '-d', self.HOST + '/32', '-j', 'RETURN')])
+        self.assertIn(('-A', r.CHAIN_A, '-j', 'DROP'), rules)
+
+    # --- regole nat -----------------------------------------------------------------------------
+    def test_alias_forwards_everything_for_the_pi_address_to_the_device_and_masquerades(self):
+        r.apply_alias(self.HOST, 'end0')
+        self.assertEqual(self.nat.rules(r.CHAIN_ALIAS_PRE), ['-m addrtype --dst-type LOCAL -j DNAT --to-destination ' + self.HOST])
+        self.assertEqual(self.nat.rules(r.CHAIN_ALIAS_POST), ['-s 100.64.0.0/10 -d %s/32 -j MASQUERADE' % self.HOST])
+        self.assertEqual(self.nat.rules('PREROUTING'), ['-i tailscale0 -j ' + r.CHAIN_ALIAS_PRE])
+        self.assertEqual(self.nat.rules('POSTROUTING'), ['-o end0 -j ' + r.CHAIN_ALIAS_POST])
+
+    def test_the_jumps_are_added_only_after_the_chains_are_filled(self):
+        r.apply_alias(self.HOST, 'end0')
+        ops = [(a[0], a[1]) for a in self.nat.log if a[0] in ('-A', '-I')]
+        first_jump = min(n for n, (op, chain) in enumerate(ops) if op == '-I')
+        self.assertEqual({chain for op, chain in ops[:first_jump]}, {r.CHAIN_ALIAS_PRE, r.CHAIN_ALIAS_POST})
+
+    def test_applying_twice_changes_nothing(self):
+        r.apply_alias(self.HOST, 'end0'); first = {k: list(v) for k, v in self.nat.chains.items()}
+        r.apply_alias(self.HOST, 'end0')
+        self.assertEqual(self.nat.chains, first)
+
+    def test_changing_device_or_interface_replaces_the_old_rules(self):
+        r.apply_alias(self.HOST, 'end0')
+        r.apply_alias('192.168.1.70', 'eth1')
+        text = str(self.nat.chains)
+        self.assertNotIn(self.HOST, text); self.assertNotIn('end0', text)
+        self.assertEqual(self.nat.rules('PREROUTING'), ['-i tailscale0 -j ' + r.CHAIN_ALIAS_PRE])
+        self.assertEqual(self.nat.rules('POSTROUTING'), ['-o eth1 -j ' + r.CHAIN_ALIAS_POST])
+
+    def test_other_rules_of_the_hooks_are_left_alone(self):
+        self.nat.chains['PREROUTING'].append(['-j', 'ts-prerouting-ish']); self.nat.chains['POSTROUTING'].append(['-j', 'ts-postrouting'])
+        r.apply_alias(self.HOST, 'end0'); r.clear_alias()
+        self.assertEqual(self.nat.rules('PREROUTING'), ['-j ts-prerouting-ish'])
+        self.assertEqual(self.nat.rules('POSTROUTING'), ['-j ts-postrouting'])
+
+    def test_clear_removes_jumps_and_chains_and_is_safe_when_there_is_nothing(self):
+        r.clear_alias()
+        r.apply_alias(self.HOST, 'end0'); r.clear_alias()
+        self.assertEqual(self.nat.chains, {'PREROUTING': [], 'POSTROUTING': []})
+        r.clear_alias()
+
+    def test_apply_nat_follows_the_mode(self):
+        r.apply_nat('alias', [self.HOST], 'end0'); self.assertTrue(self.nat.rules(r.CHAIN_ALIAS_PRE))
+        r.apply_nat('selected', [self.HOST], 'end0'); self.assertNotIn(r.CHAIN_ALIAS_PRE, self.nat.chains)
+        r.apply_nat('alias', [self.HOST], 'end0'); r.apply_nat('off', [], 'end0'); self.assertNotIn(r.CHAIN_ALIAS_PRE, self.nat.chains)
+        r.apply_nat('alias', [self.HOST], 'end0'); r.apply_nat('alias', [], 'end0'); self.assertNotIn(r.CHAIN_ALIAS_PRE, self.nat.chains)
+        r.apply_nat('alias', [self.HOST, '192.168.1.65'], 'end0'); self.assertNotIn(r.CHAIN_ALIAS_PRE, self.nat.chains)
+
+    def test_a_jump_that_cannot_be_verified_is_an_error(self):
+        self.nat.ignore_insert = True
+        with self.assertRaises(RuntimeError): r.apply_alias(self.HOST, 'end0')
+
+    def test_an_invalid_address_never_reaches_iptables(self):
+        for bad in ('192.168.1.64; reboot', '999.1.1.1', '', 'x'):
+            with self.assertRaises(ValueError): r.apply_alias(bad, 'end0')
+        self.assertEqual(self.nat.log, [])
+
+    # --- applicazione e riavvio -----------------------------------------------------------------
+    def main(self, *argv, body=None):
+        import contextlib, io, sys as _sys
+        class In: buffer = io.BytesIO(json.dumps(body).encode() if body is not None else b'')
+        out = io.StringIO()
+        with patch.object(_sys, 'argv', ['helper', *argv]), patch.object(_sys, 'stdin', In), patch.object(r.os, 'geteuid', return_value=0), \
+             contextlib.redirect_stdout(out):
+            r.main()
+        return json.loads(out.getvalue())
+
+    def recorder(self, fail=None):
+        calls = []
+        def make(name):
+            def inner(*args, **kwargs):
+                calls.append((name,) + tuple(a if not isinstance(a, dict) else a['mode'] for a in args[:2]))
+                if fail == name and not getattr(inner, 'failed', False):
+                    inner.failed = True; raise RuntimeError('guasto ' + name)
+            return inner
+        for name in ('apply_guard', 'apply_nat', 'apply_tailscale'):
+            patcher = patch.object(r, name, side_effect=make(name)); patcher.start(); self.addCleanup(patcher.stop)
+        return calls
+
+    def test_guard_comes_first_then_nat_then_tailscale(self):
+        calls = self.recorder()
+        out = self.main(body=self.PAYLOAD)
+        self.assertEqual([c[0] for c in calls], ['apply_guard', 'apply_nat', 'apply_tailscale'])
+        self.assertEqual(calls[0][1:], ('alias', [self.HOST])); self.assertEqual(calls[1][1:], ('alias', [self.HOST]))
+        self.assertEqual((out['ok'], out['mode'], out['advertised']), (True, 'alias', []))
+        self.assertEqual(json.loads((self.tmp / 'policy.json').read_text())['mode'], 'alias')
+
+    def test_a_failed_nat_step_restores_the_previous_policy_including_its_nat_state(self):
+        (self.tmp / 'policy.json').write_text(json.dumps({'mode': 'selected', 'subnets': '', 'selected_hosts': ['192.168.1.65']}))
+        calls = self.recorder(fail='apply_nat')
+        with self.assertRaises(RuntimeError): self.main(body=self.PAYLOAD)
+        self.assertEqual([c[0] for c in calls], ['apply_guard', 'apply_nat', 'apply_guard', 'apply_nat', 'apply_tailscale'])
+        self.assertEqual(calls[3][1:], ('selected', ['192.168.1.65']))
+        self.assertEqual(json.loads((self.tmp / 'policy.json').read_text())['mode'], 'selected')
+
+    def restore(self, policy, nat_fails=False):
+        (self.tmp / 'policy.json').write_text(json.dumps(policy))
+        calls = []
+        def nat(mode, hosts, dev):
+            calls.append(('nat', mode, list(hosts)))
+            if nat_fails: raise RuntimeError('guasto')
+        def guard(mode, hosts, dev, subnets=''): calls.append(('guard', mode, list(hosts)))
+        with patch.object(r, 'apply_guard', guard), patch.object(r, 'apply_nat', nat), patch.object(r, 'lan_interface', return_value='end0'), \
+             patch.object(r.time, 'sleep'):
+            out = self.main('--restore')
+        return calls, out
+
+    def test_boot_restores_the_alias_after_a_closed_guard(self):
+        calls, out = self.restore({'mode': 'alias', 'subnets': '', 'selected_hosts': [self.HOST]})
+        self.assertEqual(calls, [('guard', 'off', []), ('guard', 'alias', [self.HOST]), ('nat', 'alias', [self.HOST])])
+        self.assertEqual(out['guard_mode'], 'alias')
+
+    def test_boot_never_restores_an_alias_for_a_device_of_another_lan_or_for_several(self):
+        for hosts in (['192.168.9.64'], [self.HOST, '192.168.1.65'], []):
+            with self.subTest(hosts=hosts):
+                calls, out = self.restore({'mode': 'alias', 'subnets': '', 'selected_hosts': hosts})
+                self.assertEqual(out['guard_mode'], 'off')
+                self.assertNotIn(('nat', 'alias', hosts), calls)
+                self.assertEqual(calls[-1], ('nat', 'off', []))
+
+    def test_if_the_alias_cannot_be_set_up_at_boot_everything_stays_closed(self):
+        calls, out = self.restore({'mode': 'alias', 'subnets': '', 'selected_hosts': [self.HOST]}, nat_fails=True)
+        self.assertEqual(calls[-1], ('guard', 'off', []))
+        self.assertEqual(out['guard_mode'], 'off')
+
+    def test_boot_in_selected_mode_is_unchanged(self):
+        calls, out = self.restore({'mode': 'selected', 'subnets': '', 'selected_hosts': [self.HOST, '192.168.1.65']})
+        self.assertEqual(calls, [('guard', 'off', []), ('guard', 'selected', [self.HOST, '192.168.1.65']), ('nat', 'selected', [])])
+
+    # --- stato mostrato dal pannello ------------------------------------------------------------
+    def test_the_panel_keeps_the_alias_mode_while_no_route_is_published(self):
+        import subprocess
+        def status(saved, advertised):
+            def fake_run(args, timeout=6, input_text=None):
+                if args[:2] == ['/usr/bin/tailscale', 'status']: return subprocess.CompletedProcess([], 0, stdout='{"BackendState":"Running"}', stderr='')
+                return subprocess.CompletedProcess([], 1, stdout='', stderr='')
+            with patch.object(p, 'run', fake_run), patch.object(p, 'lan_details', return_value={}), patch.object(p, 'saved_state', return_value=dict(p.DEFAULTS, **saved)), \
+                 patch.object(p, 'pref', side_effect=lambda flag: advertised if flag == 'advertise-routes' else None):
+                return p.status_data()['settings']
+        alias = {'mode': 'alias', 'selected_hosts': [self.HOST]}
+        self.assertEqual(status(alias, [])['mode'], 'alias')
+        self.assertEqual(status(alias, [])['selected_hosts'], [self.HOST])
+        self.assertEqual(status({'mode': 'alias', 'selected_hosts': []}, [])['mode'], 'off')
+        self.assertEqual(status({'mode': 'alias', 'selected_hosts': [self.HOST, '192.168.1.65']}, [])['mode'], 'off')
+        self.assertEqual(status({'mode': 'off', 'selected_hosts': []}, [])['mode'], 'off')
+        self.assertEqual(status(alias, ['192.168.1.65/32'])['mode'], 'selected')      # rotte vere pubblicate: vincono
+        self.assertEqual(status(alias, ['192.168.1.0/24'])['mode'], 'all')
+
+    # --- iptables vero --------------------------------------------------------------------------
+    def test_with_the_real_iptables_in_a_private_network_namespace(self):
+        import shutil, subprocess as sp
+        probe = sp.run(['unshare', '-Urn', 'iptables', '-w', '5', '-t', 'nat', '-S'], capture_output=True, text=True) if shutil.which('unshare') and shutil.which('iptables') else None
+        if probe is None or probe.returncode: self.skipTest('iptables o user namespace non disponibili')
+        script = r"""
+import importlib.util, subprocess, sys
+spec = importlib.util.spec_from_file_location('h', sys.argv[1]); h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+nat = lambda: subprocess.run(['/usr/sbin/iptables', '-t', 'nat', '-S'], capture_output=True, text=True).stdout
+h.clear_alias(); assert 'TSPANEL' not in nat()
+h.apply_alias('192.168.1.64', 'end0'); a = nat()
+assert '-A TSPANEL_ALIAS_PRE -m addrtype --dst-type LOCAL -j DNAT --to-destination 192.168.1.64' in a, a
+assert '-A TSPANEL_ALIAS_POST -s 100.64.0.0/10 -d 192.168.1.64/32 -j MASQUERADE' in a, a
+assert a.count('-j TSPANEL_ALIAS_PRE') == 1 and a.count('-A PREROUTING -i tailscale0 -j TSPANEL_ALIAS_PRE') == 1, a
+h.apply_alias('192.168.1.64', 'end0'); assert nat() == a
+h.apply_alias('192.168.1.70', 'eth1'); b = nat()
+assert '192.168.1.64' not in b and b.count('-j TSPANEL_ALIAS_POST') == 1 and '-o eth1 -j TSPANEL_ALIAS_POST' in b, b
+h.apply_nat('off', [], 'end0'); assert 'TSPANEL' not in nat()
+print('IPTABLES-OK')
+"""
+        done = sp.run(['unshare', '-Urn', 'python3', '-c', script, str(DIR / 'tailscale_panel_helper.py')], capture_output=True, text=True, timeout=120)
+        self.assertIn('IPTABLES-OK', done.stdout, done.stderr + done.stdout)
+
+
 class DiscoveryTests(unittest.TestCase):
     def test_scanner_interface_configuration_consistent(self):
         self.assertEqual(d.INTERFACE_FILE, '/etc/tailscale-panel-lan.conf')
