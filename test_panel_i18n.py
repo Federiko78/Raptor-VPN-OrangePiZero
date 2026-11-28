@@ -254,9 +254,10 @@ const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
  out.port={current:txt('portCurrent'),applyDisabled:E('applyPort').disabled,msg:txt('portMessage'),msgClass:E('portMessage').className,
   box:E('portPendingBox').classList.state.hidden,confirmHidden:E('confirmPort').classList.state.hidden,text:txt('portPendingText'),
   address:txt('portNewAddress'),href:E('portNewAddress').href,countdown:txt('portCountdown')};
- if(cfg.routes){const R=cfg.routes,wait=()=>new Promise(r=>setTimeout(r,40)),ids={off:'routeOff',all:'routeAll',selected:'routeSelected',alias:'routeAlias'};
+ if(cfg.routes){const R=cfg.routes,wait=()=>new Promise(r=>setTimeout(r,40)),ids={off:'routeOff',all:'routeAll',selected:'routeSelected',alias:'routeAlias',translated:'routeTranslated'};
   if(R.scan){await E('scanLan').handlers.click();await wait();}
   if(R.mode){for(const id of Object.values(ids))E(id).checked=false;E(ids[R.mode]).checked=true;E(ids[R.mode]).onchange();}
+  if(R.transNet!==undefined){E('transNet').value=R.transNet;E('transNet').handlers.input();}
   for(const ip of R.pick||[]){const row=E('deviceList').children.find(r=>r.children[1].children[1].textContent.includes(ip));
    row.children[0].checked=true;row.children[0].handlers.change();await wait();}
   if(R.uncheck){const row=E('deviceList').children.find(r=>r.children[1].children[1].textContent.includes(R.uncheck));
@@ -264,8 +265,10 @@ const errors=[];process.on('unhandledRejection',e=>errors.push(String(e)));
   out.routesChecked=E('deviceList').children.map(r=>r.children[0].checked);
   if(R.save){await E('settings').handlers.submit({preventDefault(){}});await wait();}}
  out.routes={aliasHidden:E('aliasBox').classList.state.hidden,subnetsHidden:E('subnetsField').classList.state.hidden,aliasIp:txt('aliasIp'),
-  checked:Object.fromEntries(['routeOff','routeAll','routeSelected','routeAlias'].map(k=>[k,E(k).checked])),sent:bodies['/api/apply'],
-  message:txt('message'),messageClass:E('message').className,meta:txt('scanMeta')};
+  checked:Object.fromEntries(['routeOff','routeAll','routeSelected','routeAlias','routeTranslated'].map(k=>[k,E(k).checked])),sent:bodies['/api/apply'],
+  message:txt('message'),messageClass:E('message').className,meta:txt('scanMeta'),
+  transHidden:E('transBox').classList.state.hidden,transLan:txt('transLan'),transLanIp:txt('transLanIp'),transNet:E('transNet').value,
+  transExample:txt('transExample'),subnets:E('subnets').value,mapped:E('deviceList').children.map(r=>r.children[1].children.slice(3).map(c=>c.textContent))};
  out.netAddress=txt('newAddress');
  out.eth={ip:txt('ethIp'),mode:txt('ethMode'),url:txt('ethUrl'),href:E('ethUrl').href};
  if(cfg.messages)out.translated=cfg.messages.map(m=>vm.runInContext('S('+JSON.stringify(m)+')',ctx));
@@ -633,6 +636,91 @@ class JavaScriptRuntimeTests(unittest.TestCase):
         self.assertEqual(out['message'], 'Settings applied. Check the routes in the Tailscale admin panel.')
         none = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'selected', 'save': True})['routes']
         self.assertEqual(none['message'], 'Select at least one device from the LAN scan.')
+
+    # --- rete tradotta -------------------------------------------------------------------------
+    def trans_status(self, mode='translated', net='192.168.3.0/24', hosts=(), subnet='192.168.1.0/24', ip='192.168.1.50'):
+        body = status_body()
+        body['lan'] = dict(body['lan'], subnet=subnet, ip=ip)
+        body['settings'] = dict(body['settings'], mode=mode, subnets=net, selected_hosts=list(hosts))
+        return body
+
+    def test_translated_mode_shows_the_current_network_its_address_and_the_translated_one(self):
+        r = self.run_page(status=self.trans_status(), routes={})['routes']
+        self.assertTrue(r['checked']['routeTranslated'])
+        self.assertEqual((r['transHidden'], r['subnetsHidden'], r['aliasHidden']), (False, True, True))
+        self.assertEqual((r['transLan'], r['transLanIp'], r['transNet']), ('192.168.1.0/24', '192.168.1.50', '192.168.3.0/24'))
+        self.assertEqual(r['subnets'], '192.168.1.0/24')          # il campo dell'"Intera subnet" non prende mai la rete tradotta
+        self.assertEqual(r['transExample'], '192.168.1.1 → 192.168.3.1')
+
+    def test_the_other_modes_hide_the_translated_box_and_suggest_a_free_network(self):
+        for mode in ('off', 'all', 'selected', 'alias'):
+            with self.subTest(mode=mode):
+                r = self.run_page(status=self.trans_status(mode=mode, net='192.168.1.0/24'), routes={})['routes']
+                self.assertEqual((r['transHidden'], r['subnetsHidden'] if mode != 'alias' else False), (True, False))
+                self.assertFalse(r['checked']['routeTranslated'])
+                self.assertEqual(r['transNet'], '192.168.2.0/24')
+
+    def test_the_suggested_network_is_free_and_as_big_as_the_current_one(self):
+        for subnet, ip, suggested in (('192.168.1.0/24', '192.168.1.50', '192.168.2.0/24'), ('192.168.2.0/24', '192.168.2.5', '192.168.3.0/24'),
+                                      ('192.168.1.128/25', '192.168.1.130', '192.168.2.128/25'), ('10.0.0.0/24', '10.0.0.9', '192.168.2.0/24'),
+                                      ('172.16.5.0/28', '172.16.5.3', '192.168.2.0/28'), ('192.168.0.0/16', '192.168.0.5', ''), ('', '-', '')):
+            with self.subTest(subnet=subnet):
+                r = self.run_page(status=self.trans_status(mode='off', net='', subnet=subnet, ip=ip), routes={})['routes']
+                self.assertEqual(r['transNet'], suggested)
+
+    def test_switching_the_radio_toggles_the_translated_box(self):
+        on = self.run_page(routes={'mode': 'translated'})['routes']
+        off = self.run_page(status=self.trans_status(), routes={'mode': 'selected'})['routes']
+        self.assertEqual((on['transHidden'], on['subnetsHidden']), (False, True))
+        self.assertEqual((off['transHidden'], off['subnetsHidden']), (True, False))
+
+    def test_every_device_shows_the_address_it_has_from_tailscale(self):
+        out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'translated'})['routes']
+        self.assertEqual(out['mapped'], [['From Tailscale: 192.168.2.64'], ['From Tailscale: 192.168.2.65']])
+        it = self.run_page('it', extra=self.SCAN, routes={'scan': True, 'mode': 'translated'})['routes']
+        self.assertEqual(it['mapped'][0], ['Da Tailscale: 192.168.2.64'])
+        for mode in ('selected', 'alias', 'all', 'off'):
+            self.assertEqual(self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': mode})['routes']['mapped'], [[], []])
+
+    def test_the_addresses_follow_what_is_typed(self):
+        for typed, first, example in (('192.168.9.0/24', ['From Tailscale: 192.168.9.64'], '192.168.1.64 → 192.168.9.64'),
+                                      ('10.7.7.0/24', ['From Tailscale: 10.7.7.64'], '192.168.1.64 → 10.7.7.64'),
+                                      ('192.168.9.0/25', [], '-'),     # misura diversa: il programma la rifiuterebbe, qui non si mostra nessun indirizzo
+                                      ('x', [], '-'), ('', [], '-')):
+            with self.subTest(typed=typed):
+                r = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'translated', 'transNet': typed, 'pick': ['192.168.1.64']})['routes']
+                self.assertEqual((r['mapped'][0], r['transExample']), (first, example))
+
+    def test_translated_whole_network_is_saved_with_the_typed_network_and_no_device(self):
+        out = self.run_page(routes={'mode': 'translated', 'transNet': '192.168.2.0/24', 'save': True, **{}}, extra=self.SCAN)['routes']
+        self.assertEqual((out['sent']['mode'], out['sent']['subnets'], out['sent']['selected_hosts']), ('translated', '192.168.2.0/24', []))
+        self.assertEqual((out['message'], out['messageClass']),
+                         ('Translated network active: 192.168.1.0/24 is published as 192.168.2.0/24. Approve the route in the Tailscale admin panel.', 'ok'))
+        it = self.run_page('it', routes={'mode': 'translated', 'transNet': '192.168.2.0/24', 'save': True}, extra=self.SCAN)['routes']
+        self.assertEqual(it['message'], 'Rete tradotta attiva: 192.168.1.0/24 viene pubblicata come 192.168.2.0/24. Approva la rotta nel pannello di amministrazione Tailscale.')
+
+    def test_translated_with_chosen_devices_sends_only_those(self):
+        out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': 'translated', 'pick': ['192.168.1.64', '192.168.1.65'], 'save': True})['routes']
+        self.assertEqual((out['sent']['mode'], out['sent']['subnets'], out['sent']['selected_hosts']), ('translated', '192.168.2.0/24', ['192.168.1.64', '192.168.1.65']))
+
+    def test_the_translated_network_is_required_and_nothing_is_sent_without_it(self):
+        out = self.run_page(extra=self.SCAN, routes={'mode': 'translated', 'transNet': '  ', 'save': True})['routes']
+        self.assertIsNone(out.get('sent'))
+        self.assertEqual((out['message'], out['messageClass']), ('Enter the translated network (example 192.168.2.0/24).', 'err'))
+
+    def test_the_other_modes_never_send_the_translated_network(self):
+        for mode in ('all', 'selected', 'alias', 'off'):
+            with self.subTest(mode=mode):
+                out = self.run_page(extra=self.SCAN, routes={'scan': True, 'mode': mode, 'pick': ['192.168.1.64'], 'save': True})['routes']
+                self.assertEqual(out['sent']['subnets'], '192.168.1.0/24')
+
+    def test_a_refusal_of_the_translated_network_is_shown_in_the_language_of_the_page(self):
+        refusal = {'/api/apply': {'ok': False, 'body': {'error': 'The translated network must be the same size as the LAN network (/24)'}}}
+        en = self.run_page(extra=refusal, routes={'mode': 'translated', 'transNet': '192.168.2.0/25', 'save': True})['routes']
+        it = self.run_page('it', extra=refusal, routes={'mode': 'translated', 'transNet': '192.168.2.0/25', 'save': True})['routes']
+        self.assertEqual(en['message'], 'The translated network must be the same size as the LAN network (/24)')
+        self.assertEqual(it['message'], 'La rete tradotta deve avere la stessa dimensione della rete attuale (/24).')
+        self.assertEqual(it['messageClass'], 'err')
 
     def test_the_new_ethernet_address_follows_the_real_port(self):
         network = {'supported': True, 'mode': 'static', 'ip': '192.168.1.60', 'prefix': 24, 'gateway': '192.168.1.1', 'dns': ['1.1.1.1'],

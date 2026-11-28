@@ -3,6 +3,7 @@
 import importlib.util
 import ipaddress
 import json
+import os
 import pathlib
 import unittest
 from unittest.mock import patch
@@ -279,10 +280,10 @@ class AliasTests(unittest.TestCase):
     def restore(self, policy, nat_fails=False):
         (self.tmp / 'policy.json').write_text(json.dumps(policy))
         calls = []
-        def nat(mode, hosts, dev):
+        def nat(mode, hosts, dev, trans=None):
             calls.append(('nat', mode, list(hosts)))
             if nat_fails: raise RuntimeError('guasto')
-        def guard(mode, hosts, dev, subnets=''): calls.append(('guard', mode, list(hosts)))
+        def guard(mode, hosts, dev, subnets='', lan=''): calls.append(('guard', mode, list(hosts)))
         with patch.object(r, 'apply_guard', guard), patch.object(r, 'apply_nat', nat), patch.object(r, 'lan_interface', return_value='end0'), \
              patch.object(r.time, 'sleep'):
             out = self.main('--restore')
@@ -351,6 +352,412 @@ print('IPTABLES-OK')
 """
         done = sp.run(['unshare', '-Urn', 'python3', '-c', script, str(DIR / 'tailscale_panel_helper.py')], capture_output=True, text=True, timeout=120)
         self.assertIn('IPTABLES-OK', done.stdout, done.stderr + done.stdout)
+
+
+PACKET_PATH_SCRIPT = r'''import fcntl, importlib.util, ipaddress, os, select, socket, struct, subprocess, sys
+
+spec = importlib.util.spec_from_file_location('h', sys.argv[1]); h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+TUNSETIFF, IFF_TUN, IFF_NO_PI = 0x400454ca, 0x0001, 0x1000
+SIOCSIFADDR, SIOCSIFNETMASK, SIOCSIFFLAGS, SIOCGIFFLAGS = 0x8916, 0x891c, 0x8914, 0x8913
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def sockaddr(ip): return struct.pack('HH4s8x', socket.AF_INET, 0, socket.inet_aton(ip))
+def tun(name, ip, mask):
+    fd = os.open('/dev/net/tun', os.O_RDWR)
+    fcntl.ioctl(fd, TUNSETIFF, struct.pack('16sH', name.encode(), IFF_TUN | IFF_NO_PI))
+    fcntl.ioctl(s, SIOCSIFADDR, struct.pack('16s', name.encode()) + sockaddr(ip))
+    fcntl.ioctl(s, SIOCSIFNETMASK, struct.pack('16s', name.encode()) + sockaddr(mask))
+    flags = struct.unpack('16sH', fcntl.ioctl(s, SIOCGIFFLAGS, struct.pack('16sH', name.encode(), 0)))[1]
+    fcntl.ioctl(s, SIOCSIFFLAGS, struct.pack('16sH', name.encode(), flags | 1))
+    os.set_blocking(fd, False)
+    return fd
+
+def checksum(data):
+    total = sum(struct.unpack('!%dH' % (len(data) // 2), data))
+    while total >> 16: total = (total & 0xffff) + (total >> 16)
+    return ~total & 0xffff
+def udp(src, dst, sport, dport):
+    body = struct.pack('!HHHH', sport, dport, 9, 0) + b'x'
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(body), 1, 0, 64, 17, 0, socket.inet_aton(src), socket.inet_aton(dst))
+    return ip[:10] + struct.pack('!H', checksum(ip)) + ip[12:] + body
+def parse(pkt):
+    return (socket.inet_ntoa(pkt[12:16]), struct.unpack('!H', pkt[20:22])[0], socket.inet_ntoa(pkt[16:20]), struct.unpack('!H', pkt[22:24])[0])
+def drain(fd):
+    out = []
+    while select.select([fd], [], [], 0.3)[0]:
+        try: out.append(parse(os.read(fd, 2048)))
+        except BlockingIOError: break
+    return [x for x in out if x[3] != 0 and len(x) == 4]
+
+# tailscale0 carries the whole tailnet (100.64.0.0/10), end0 is the LAN
+ts = tun('tailscale0', '100.64.0.1', '255.192.0.0')
+lan = tun('end0', '192.168.1.200', '255.255.255.0')
+open('/proc/sys/net/ipv4/ip_forward', 'w').write('1')
+local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); local.bind(('0.0.0.0', 2222)); local.setblocking(False)
+
+PEER = '100.64.0.2'
+ports = iter(range(40000, 41000))
+def send(dst, dport=80):
+    sport = next(ports)
+    drain(lan); drain(ts)
+    os.write(ts, udp(PEER, dst, sport, dport))
+    return sport, drain(lan)
+def reaches_the_pi(dst):
+    try: local.recvfrom(100); return True
+    except BlockingIOError: return False
+
+LAN, NET, LOCAL = '192.168.1.0/24', '192.168.2.0/24', '192.168.1.200'
+trans = {'net': NET, 'lan': LAN, 'local': LOCAL}
+
+# --- whole network ------------------------------------------------------------------------------
+h.apply_guard('translated', [], 'end0', NET, LAN); h.apply_nat('translated', [], 'end0', trans)
+sport, got = send('192.168.2.64')
+assert got == [(LOCAL, sport, '192.168.1.64', 80)], ('whole: translated + masqueraded', got)
+os.write(lan, udp('192.168.1.64', LOCAL, 80, sport))      # the device answers to the Pi
+back = drain(ts)
+assert back == [('192.168.2.64', 80, PEER, sport)], ('whole: the answer comes back from the translated address', back)
+sport, got = send('192.168.2.10'); assert got == [(LOCAL, sport, '192.168.1.10', 80)], ('whole: any address of the network', got)
+sport, got = send('192.168.1.64'); assert got == [], ('whole: a packet for the real address, not translated, is dropped', got)
+sport, got = send('192.168.2.200', 2222); assert got == [] and not reaches_the_pi('x'), ('whole: the Pi itself is not reachable', got)
+sport, got = send('192.168.2.0'); assert got == [], ('whole: network address', got)
+sport, got = send('192.168.2.255'); assert got == [], ('whole: broadcast address', got)
+sport, got = send('192.168.3.64'); assert got == [], ('whole: another network is not translated', got)
+
+# --- chosen devices only ------------------------------------------------------------------------
+h.apply_guard('translated', ['192.168.1.64'], 'end0', NET, LAN); h.apply_nat('translated', ['192.168.1.64'], 'end0', trans)
+sport, got = send('192.168.2.64'); assert got == [(LOCAL, sport, '192.168.1.64', 80)], ('selected: the chosen device', got)
+os.write(lan, udp('192.168.1.64', LOCAL, 80, sport)); assert drain(ts) == [('192.168.2.64', 80, PEER, sport)], 'selected: answer'
+sport, got = send('192.168.2.65'); assert got == [], ('selected: another device of the network', got)
+sport, got = send('192.168.1.64'); assert got == [], ('selected: real address not translated', got)
+sport, got = send('192.168.1.65'); assert got == [], ('selected: other real address', got)
+
+# --- off --------------------------------------------------------------------------------------
+h.apply_guard('off', [], 'end0'); h.apply_nat('off', [], 'end0')
+sport, got = send('192.168.2.64'); assert got == [], ('off: nothing', got)
+sport, got = send('192.168.1.64'); assert got == [], ('off: nothing (real address)', got)
+assert 'TSPANEL' not in subprocess.run(['/usr/sbin/iptables', '-t', 'nat', '-S'], capture_output=True, text=True).stdout
+print('PACKET-PATH-OK')
+'''
+
+
+class TranslatedTests(unittest.TestCase):
+    """Modo "Rete tradotta": la LAN 192.168.1.x si vede da Tailscale come 192.168.2.x."""
+    LAN = '192.168.1.0/24'
+    NET = '192.168.2.0/24'
+    LOCAL = '192.168.1.200'
+    NVR = '192.168.1.64'
+    PAYLOAD = {'mode': 'translated', 'subnets': NET, 'selected_hosts': [], 'snat': True, 'accept_routes': False,
+               'accept_dns': True, 'auto_update': True}
+    TRANS = {'net': NET, 'lan': LAN, 'local': LOCAL}
+
+    def setUp(self):
+        import tempfile, shutil
+        self.lan = patch.object(r, 'current_lan', return_value=('end0', ipaddress.IPv4Address(self.LOCAL), ipaddress.IPv4Network(self.LAN)))
+        self.lan.start(); self.addCleanup(self.lan.stop)
+        self.used = patch.object(r, 'local_networks', return_value=[ipaddress.IPv4Network(self.LAN), ipaddress.IPv4Network('192.168.4.0/24')])
+        self.used.start(); self.addCleanup(self.used.stop)
+        self.tmp = pathlib.Path(tempfile.mkdtemp()); self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+        for name, value in (('BASE', str(self.tmp)), ('LOCK', str(self.tmp / 'lock')), ('POLICY', str(self.tmp / 'policy.json'))):
+            patcher = patch.object(r, name, value); patcher.start(); self.addCleanup(patcher.stop)
+        self.nat = FakeNat()
+        patcher = patch.object(r, 'ipt_nat', self.nat); patcher.start(); self.addCleanup(patcher.stop)
+
+    def valid(self, **change):
+        return r.validate(dict(self.PAYLOAD, **change))[0]
+
+    # --- validazione ----------------------------------------------------------------------------
+    def test_the_whole_lan_or_chosen_devices_can_be_translated(self):
+        whole = self.valid()
+        self.assertEqual((whole['mode'], whole['subnets'], whole['selected_hosts'], whole['lan'], whole['local']),
+                         ('translated', self.NET, [], self.LAN, self.LOCAL))
+        chosen = self.valid(selected_hosts=[self.NVR, '192.168.1.65'])
+        self.assertEqual(chosen['selected_hosts'], [self.NVR, '192.168.1.65'])
+        self.assertIn('translated', r.MODES)
+
+    def test_a_bad_translated_network_is_rejected(self):
+        for bad in ('', '   ', '192.168.2.0/24, 192.168.3.0/24', '192.168.2.0/25', '192.168.2.0/16', '192.168.2.5/24', 'rete',
+                    '192.168.1.0/24',          # e' la LAN stessa
+                    '192.168.4.0/24',          # e' gia' una rete di questa scheda (per esempio il Wi-Fi)
+                    '8.8.8.0/24', '0.0.0.0/0', '100.64.0.0/24', '224.0.0.0/24'):
+            with self.subTest(net=bad):
+                with self.assertRaises(ValueError): self.valid(subnets=bad)
+        with self.assertRaises(ValueError): r.validate(dict(self.PAYLOAD, subnets=None))
+
+    def test_the_lan_itself_is_refused_even_if_the_routing_table_cannot_be_read(self):
+        with patch.object(r, 'local_networks', return_value=[]):
+            for net in (self.LAN, '192.168.1.0/24'):
+                with self.assertRaises(ValueError): self.valid(subnets=net)
+            self.assertEqual(self.valid(subnets=self.NET)['subnets'], self.NET)
+
+    def test_the_translated_network_must_have_the_size_of_the_lan(self):
+        with patch.object(r, 'current_lan', return_value=('end0', ipaddress.IPv4Address('192.168.1.130'), ipaddress.IPv4Network('192.168.1.128/25'))):
+            self.assertEqual(r.validate(dict(self.PAYLOAD, subnets='192.168.9.128/25'))[0]['subnets'], '192.168.9.128/25')
+            with self.assertRaises(ValueError): r.validate(dict(self.PAYLOAD, subnets=self.NET))
+
+    def test_chosen_devices_must_be_on_the_lan_and_not_the_pi(self):
+        for hosts in (['192.168.2.64'], [self.LOCAL], ['192.168.1.0'], ['192.168.1.255'], ['x']):
+            with self.subTest(hosts=hosts):
+                with self.assertRaises(ValueError): self.valid(selected_hosts=hosts)
+
+    def test_the_other_modes_ignore_the_translated_network(self):
+        self.assertNotIn('translated', str(self.valid(mode='off', subnets='')['selected_hosts']))
+        self.assertEqual(self.valid(mode='all', subnets=self.LAN)['subnets'], self.LAN)
+        self.assertEqual(self.valid(mode='off', subnets='')['selected_hosts'], [])
+
+    def test_routes_used_by_the_board_are_read_without_the_default_route(self):
+        out = json.dumps([{'dst': 'default', 'gateway': '192.168.1.1'}, {'dst': '192.168.1.0/24'}, {'dst': '10.9.8.7'}, {'dst': '192.168.4.0/24'}, {'x': 1}])
+        self.used.stop(); self.addCleanup(self.used.start)
+        with patch.object(r, 'run', return_value=type('P', (), {'stdout': out})()):
+            self.assertEqual([str(n) for n in r.local_networks()], ['192.168.1.0/24', '10.9.8.7/32', '192.168.4.0/24'])
+        with patch.object(r, 'run', side_effect=RuntimeError('no')):
+            self.assertEqual(r.local_networks(), [])
+
+    # --- indirizzi -------------------------------------------------------------------------------
+    def test_every_address_keeps_its_place_in_the_translated_network(self):
+        lan, net = ipaddress.IPv4Network(self.LAN), ipaddress.IPv4Network(self.NET)
+        self.assertEqual(r.map_address('192.168.1.64', lan, net), '192.168.2.64')
+        self.assertEqual(r.map_address('192.168.1.1', lan, net), '192.168.2.1')
+        self.assertEqual(r.map_address('192.168.1.255', lan, net), '192.168.2.255')
+        self.assertEqual(r.map_address('192.168.1.130', ipaddress.IPv4Network('192.168.1.128/25'), ipaddress.IPv4Network('192.168.9.128/25')), '192.168.9.130')
+        self.assertEqual(r.map_address('10.5.3.4', ipaddress.IPv4Network('10.5.0.0/16'), ipaddress.IPv4Network('172.20.0.0/16')), '172.20.3.4')
+
+    def test_the_published_route_is_the_translated_network_or_the_translated_devices(self):
+        self.assertEqual(r.active_routes(self.valid()), self.NET)
+        self.assertEqual(r.active_routes(self.valid(selected_hosts=['192.168.1.65', self.NVR])), '192.168.2.64/32,192.168.2.65/32')
+        with patch.object(r, 'run') as run:
+            r.apply_tailscale(self.valid(selected_hosts=[self.NVR]))
+        self.assertIn('--advertise-routes=192.168.2.64/32', run.call_args[0][0])
+
+    # --- filtro del traffico ------------------------------------------------------------------
+    def guard(self, selected, lan=LAN):
+        rules = []
+        def fake_ipt(*args, check=True):
+            rules.append(args)
+            class O: returncode = 0
+            return O()
+        new, old = ['-i', 'tailscale0', '-o', 'end0', '-j', r.CHAIN_A], ['-i', 'tailscale0', '-o', 'end0', '-j', r.CHAIN_B]
+        with patch.object(r, 'fwd_rules', side_effect=[[], [new, old], [new]]), patch.object(r, 'ipt', side_effect=fake_ipt), patch.object(r, 'guard_ip6'):
+            r.apply_guard('translated', selected, 'end0', self.NET, lan)
+        return rules
+
+    def test_the_guard_lets_through_only_translated_packets_for_the_real_addresses(self):
+        rules = self.guard([])
+        self.assertEqual([x for x in rules if 'RETURN' in x],
+                         [('-A', r.CHAIN_A, '-d', self.LAN, '-m', 'conntrack', '--ctstate', 'DNAT', '-j', 'RETURN')])
+        self.assertEqual(rules[-3:-1], [('-A', r.CHAIN_A, '-j', 'DROP'), ('-I', 'FORWARD', '1', '-i', 'tailscale0', '-o', 'end0', '-j', r.CHAIN_A)])
+        rules = self.guard([self.NVR, '192.168.1.65'])
+        self.assertEqual([x for x in rules if 'RETURN' in x],
+                         [('-A', r.CHAIN_A, '-d', d + '/32', '-m', 'conntrack', '--ctstate', 'DNAT', '-j', 'RETURN') for d in (self.NVR, '192.168.1.65')])
+        self.assertNotIn(self.NET, str(rules))             # il filtro vede gli indirizzi veri, mai quelli tradotti
+
+    def test_the_guard_needs_the_real_lan_when_no_device_is_chosen(self):
+        for lan in ('', '8.8.8.0/24', 'x'):
+            with self.subTest(lan=lan):
+                with self.assertRaises(ValueError): self.guard([], lan)
+
+    # --- regole nat -----------------------------------------------------------------------------
+    def test_the_whole_lan_is_translated_with_netmap_and_masqueraded(self):
+        r.apply_translated(self.TRANS, [], 'end0')
+        self.assertEqual(self.nat.rules(r.CHAIN_ALIAS_PRE), [
+            '-d 192.168.2.200/32 -j RETURN', '-d 192.168.2.0/32 -j RETURN', '-d 192.168.2.255/32 -j RETURN',
+            '-d 192.168.2.0/24 -j NETMAP --to 192.168.1.0/24'])
+        self.assertEqual(self.nat.rules(r.CHAIN_ALIAS_POST), ['-s 100.64.0.0/10 -d 192.168.1.0/24 -j MASQUERADE'])
+        self.assertEqual(self.nat.rules('PREROUTING'), ['-i tailscale0 -j ' + r.CHAIN_ALIAS_PRE])
+        self.assertEqual(self.nat.rules('POSTROUTING'), ['-o end0 -j ' + r.CHAIN_ALIAS_POST])
+
+    def test_chosen_devices_are_translated_one_by_one_without_netmap(self):
+        r.apply_translated(self.TRANS, [self.NVR, '192.168.1.65'], 'end0')
+        self.assertEqual(self.nat.rules(r.CHAIN_ALIAS_PRE), ['-d 192.168.2.64/32 -j DNAT --to-destination 192.168.1.64',
+                                                             '-d 192.168.2.65/32 -j DNAT --to-destination 192.168.1.65'])
+        self.assertEqual(self.nat.rules(r.CHAIN_ALIAS_POST), ['-s 100.64.0.0/10 -d 192.168.1.64/32 -j MASQUERADE',
+                                                              '-s 100.64.0.0/10 -d 192.168.1.65/32 -j MASQUERADE'])
+        self.assertNotIn('NETMAP', str(self.nat.chains))
+
+    def test_the_jumps_are_added_only_after_the_chains_are_filled(self):
+        r.apply_translated(self.TRANS, [], 'end0')
+        ops = [(a[0], a[1]) for a in self.nat.log if a[0] in ('-A', '-I')]
+        first_jump = min(n for n, (op, chain) in enumerate(ops) if op == '-I')
+        self.assertEqual({chain for op, chain in ops[:first_jump]}, {r.CHAIN_ALIAS_PRE, r.CHAIN_ALIAS_POST})
+
+    def test_applying_twice_changes_nothing_and_every_mode_replaces_the_previous_one(self):
+        r.apply_translated(self.TRANS, [], 'end0'); first = {k: list(v) for k, v in self.nat.chains.items()}
+        r.apply_translated(self.TRANS, [], 'end0'); self.assertEqual(self.nat.chains, first)
+        r.apply_nat('translated', [self.NVR], 'end0', self.TRANS); self.assertNotIn('NETMAP', str(self.nat.chains))
+        r.apply_nat('alias', [self.NVR], 'end0'); self.assertIn('LOCAL', str(self.nat.chains)); self.assertNotIn('192.168.2', str(self.nat.chains))
+        r.apply_nat('translated', [], 'end0', self.TRANS); self.assertNotIn('LOCAL', str(self.nat.chains))
+        for mode in ('off', 'selected', 'all'):
+            r.apply_nat('translated', [], 'end0', self.TRANS)
+            r.apply_nat(mode, [self.NVR], 'end0'); self.assertNotIn(r.CHAIN_ALIAS_PRE, self.nat.chains)
+            self.assertEqual(self.nat.chains, {'PREROUTING': [], 'POSTROUTING': []})
+        r.apply_nat('translated', [], 'end0', None); self.assertNotIn(r.CHAIN_ALIAS_PRE, self.nat.chains)   # senza dati: resta tutto chiuso
+
+    def test_without_netmap_the_whole_lan_is_refused_cleanly_but_chosen_devices_still_work(self):
+        real = self.nat.__call__
+        def no_netmap(*args, check=True):
+            if 'NETMAP' in args: raise RuntimeError("Couldn't load target `NETMAP'")
+            return real(*args, check=check)
+        with patch.object(r, 'ipt_nat', no_netmap):
+            with self.assertRaises(RuntimeError) as caught: r.apply_translated(self.TRANS, [], 'end0')
+            self.assertEqual(str(caught.exception), r.NETMAP_MISSING)
+            self.assertEqual(self.nat.chains, {'PREROUTING': [], 'POSTROUTING': []})              # niente a meta'
+            r.apply_translated(self.TRANS, [self.NVR], 'end0')
+            self.assertTrue(self.nat.rules(r.CHAIN_ALIAS_PRE))
+
+    def test_another_failure_is_not_taken_for_a_missing_netmap(self):
+        real = self.nat.__call__
+        def broken(*args, check=True):
+            if args[:1] == ('-A',) and 'MASQUERADE' in args: raise RuntimeError('boom')
+            return real(*args, check=check)
+        with patch.object(r, 'ipt_nat', broken):
+            with self.assertRaisesRegex(RuntimeError, 'boom'): r.apply_translated(self.TRANS, [], 'end0')
+
+    def test_invalid_data_never_reaches_iptables(self):
+        for trans, hosts in (({**self.TRANS, 'net': '192.168.1.0/24'}, []), ({**self.TRANS, 'net': '192.168.2.0/25'}, []),
+                             ({**self.TRANS, 'net': '192.168.2.1/24'}, []), ({**self.TRANS, 'local': '192.168.9.9'}, []),
+                             ({**self.TRANS, 'lan': '192.168.1.5/24'}, []), (self.TRANS, ['192.168.9.64']), (self.TRANS, ['x; reboot']),
+                             (self.TRANS, 'x'), ({**self.TRANS, 'net': '192.168.2.0/24; reboot'}, [])):
+            with self.subTest(trans=trans, hosts=hosts):
+                with self.assertRaises(ValueError): r.apply_translated(trans, hosts, 'end0')
+        self.assertEqual(self.nat.log, [])
+
+    # --- che cosa viene salvato ----------------------------------------------------------------
+    def test_the_policy_remembers_the_lan_only_for_the_translated_mode(self):
+        r.save_policy(self.valid())
+        self.assertEqual(json.loads((self.tmp / 'policy.json').read_text()),
+                         {'mode': 'translated', 'subnets': self.NET, 'selected_hosts': [], 'lan': self.LAN})
+        r.save_policy(self.valid(mode='selected', subnets='', selected_hosts=[self.NVR]))
+        self.assertEqual(set(json.loads((self.tmp / 'policy.json').read_text())), {'mode', 'subnets', 'selected_hosts'})
+
+    def test_the_translation_is_only_for_the_lan_it_was_set_up_on(self):
+        policy = {'mode': 'translated', 'subnets': self.NET, 'selected_hosts': [], 'lan': self.LAN}
+        self.assertEqual(r.translation(policy, self.LAN, self.LOCAL), self.TRANS)
+        for bad in (dict(policy, lan='192.168.5.0/24'), {k: v for k, v in policy.items() if k != 'lan'}, dict(policy, mode='selected'),
+                    dict(policy, subnets=''), dict(policy, subnets='1.2.3.0/24'), dict(policy, subnets='192.168.2.0/24,192.168.3.0/24'), None, []):
+            with self.subTest(bad=bad): self.assertIsNone(r.translation(bad, self.LAN, self.LOCAL))
+
+    # --- applicazione e riavvio -----------------------------------------------------------------
+    def main(self, *argv, body=None):
+        import contextlib, io, sys as _sys
+        class In: buffer = io.BytesIO(json.dumps(body).encode() if body is not None else b'')
+        out = io.StringIO()
+        with patch.object(_sys, 'argv', ['helper', *argv]), patch.object(_sys, 'stdin', In), patch.object(r.os, 'geteuid', return_value=0), \
+             contextlib.redirect_stdout(out):
+            r.main()
+        return json.loads(out.getvalue())
+
+    def record(self, fail=None):
+        calls = []
+        def make(name):
+            def inner(*args, **kwargs):
+                calls.append((name, args))
+                if fail == name and not getattr(inner, 'failed', False):
+                    inner.failed = True; raise RuntimeError('guasto ' + name)
+            return inner
+        for name in ('apply_guard', 'apply_nat', 'apply_tailscale'):
+            patcher = patch.object(r, name, side_effect=make(name)); patcher.start(); self.addCleanup(patcher.stop)
+        return calls
+
+    def test_applying_goes_guard_then_nat_then_tailscale_with_the_translation(self):
+        calls = self.record()
+        out = self.main(body=dict(self.PAYLOAD, selected_hosts=[self.NVR]))
+        self.assertEqual([c[0] for c in calls], ['apply_guard', 'apply_nat', 'apply_tailscale'])
+        self.assertEqual(calls[0][1], ('translated', [self.NVR], 'end0', self.NET, self.LAN))
+        self.assertEqual(calls[1][1], ('translated', [self.NVR], 'end0', self.TRANS))
+        self.assertEqual((out['ok'], out['mode'], out['advertised']), (True, 'translated', ['192.168.2.64/32']))
+        self.assertEqual(json.loads((self.tmp / 'policy.json').read_text())['lan'], self.LAN)
+
+    def test_a_failed_step_brings_back_the_previous_translation(self):
+        (self.tmp / 'policy.json').write_text(json.dumps({'mode': 'translated', 'subnets': '192.168.3.0/24', 'selected_hosts': [], 'lan': self.LAN}))
+        calls = self.record(fail='apply_tailscale')
+        with self.assertRaises(RuntimeError): self.main(body=self.PAYLOAD)
+        self.assertEqual([c[0] for c in calls], ['apply_guard', 'apply_nat', 'apply_tailscale', 'apply_guard', 'apply_nat', 'apply_tailscale'])
+        self.assertEqual(calls[3][1], ('translated', [], 'end0', '192.168.3.0/24', self.LAN))
+        self.assertEqual(calls[4][1], ('translated', [], 'end0', {'net': '192.168.3.0/24', 'lan': self.LAN, 'local': self.LOCAL}))
+        self.assertEqual(json.loads((self.tmp / 'policy.json').read_text())['subnets'], '192.168.3.0/24')
+
+    def test_a_failed_step_after_a_translated_policy_of_another_lan_translates_nothing(self):
+        (self.tmp / 'policy.json').write_text(json.dumps({'mode': 'translated', 'subnets': '192.168.3.0/24', 'selected_hosts': [], 'lan': '10.0.0.0/24'}))
+        calls = self.record(fail='apply_nat')
+        with self.assertRaises(RuntimeError): self.main(body=self.PAYLOAD)
+        self.assertIsNone(calls[3][1][3])
+
+    def restore(self, policy, nat_fails=False, lan=LAN, local=LOCAL):
+        (self.tmp / 'policy.json').write_text(json.dumps(policy))
+        calls = []
+        def nat(mode, hosts, dev, trans=None):
+            calls.append(('nat', mode, list(hosts), trans))
+            if nat_fails: raise RuntimeError('guasto')
+        def guard(mode, hosts, dev, subnets='', lan=''): calls.append(('guard', mode, list(hosts), subnets, lan))
+        network = ipaddress.IPv4Network(lan)
+        with patch.object(r, 'apply_guard', guard), patch.object(r, 'apply_nat', nat), patch.object(r, 'lan_interface', return_value='end0'), \
+             patch.object(r, 'current_lan', return_value=('end0', ipaddress.IPv4Address(local), network)), patch.object(r.time, 'sleep'):
+            out = self.main('--restore')
+        return calls, out
+
+    def saved(self, **change):
+        return dict({'mode': 'translated', 'subnets': self.NET, 'selected_hosts': [], 'lan': self.LAN}, **change)
+
+    def test_boot_brings_the_translation_back_after_a_closed_guard(self):
+        calls, out = self.restore(self.saved())
+        self.assertEqual(calls, [('guard', 'off', [], '', ''), ('guard', 'translated', [], self.NET, self.LAN), ('nat', 'translated', [], self.TRANS)])
+        self.assertEqual(out['guard_mode'], 'translated')
+        calls, out = self.restore(self.saved(selected_hosts=[self.NVR]))
+        self.assertEqual(calls[-2:], [('guard', 'translated', [self.NVR], self.NET, self.LAN), ('nat', 'translated', [self.NVR], self.TRANS)])
+
+    def test_boot_never_translates_on_another_lan_or_when_something_no_longer_fits(self):
+        cases = [('another LAN', self.saved(lan='192.168.5.0/24'), {}),
+                 ('no LAN saved', {k: v for k, v in self.saved().items() if k != 'lan'}, {}),
+                 ('device of another LAN', self.saved(selected_hosts=['192.168.9.64']), {}),
+                 ('one device gone', self.saved(selected_hosts=[self.NVR, '192.168.9.64']), {}),
+                 ('device listed twice', self.saved(selected_hosts=[self.NVR, self.NVR]), {}),
+                 ('translated net is now the LAN', self.saved(subnets=self.LAN), {}),
+                 ('translated net is now used by the board', self.saved(subnets='192.168.4.0/24'), {}),
+                 ('broken network', self.saved(subnets='x'), {})]
+        for name, policy, extra in cases:
+            with self.subTest(name):
+                calls, out = self.restore(policy, **extra)
+                self.assertEqual(out['guard_mode'], 'off')
+                self.assertNotIn('translated', [c[1] for c in calls[1:] if c[0] == 'guard'])
+                self.assertEqual(calls[-1][:3], ('nat', 'off', []))
+
+    def test_if_the_translation_cannot_be_set_up_at_boot_everything_stays_closed(self):
+        calls, out = self.restore(self.saved(), nat_fails=True)
+        self.assertEqual(calls[-1][:3], ('guard', 'off', [])); self.assertEqual(out['guard_mode'], 'off')
+
+    def test_the_other_modes_are_restored_as_before(self):
+        calls, out = self.restore({'mode': 'selected', 'subnets': '', 'selected_hosts': [self.NVR]})
+        self.assertEqual(calls[-2:], [('guard', 'selected', [self.NVR], '', ''), ('nat', 'selected', [], None)])
+
+    # --- stato mostrato dal pannello ------------------------------------------------------------
+    def test_the_panel_recognises_the_translated_mode_from_the_published_routes(self):
+        import subprocess
+        def status(saved, advertised):
+            def fake_run(args, timeout=6, input_text=None):
+                if args[:2] == ['/usr/bin/tailscale', 'status']: return subprocess.CompletedProcess([], 0, stdout='{"BackendState":"Running"}', stderr='')
+                return subprocess.CompletedProcess([], 1, stdout='', stderr='')
+            with patch.object(p, 'run', fake_run), patch.object(p, 'lan_details', return_value={}), patch.object(p, 'saved_state', return_value=dict(p.DEFAULTS, **saved)), \
+                 patch.object(p, 'pref', side_effect=lambda flag: advertised if flag == 'advertise-routes' else None):
+                return p.status_data()['settings']
+        saved = {'mode': 'translated', 'subnets': self.NET, 'selected_hosts': [self.NVR]}
+        for advertised in ([self.NET], ['192.168.2.64/32'], ['192.168.2.64/32', '192.168.2.65/32']):
+            with self.subTest(advertised=advertised):
+                got = status(saved, advertised)
+                self.assertEqual((got['mode'], got['subnets'], got['selected_hosts']), ('translated', self.NET, [self.NVR]))
+        self.assertEqual(status(saved, [])['mode'], 'off')
+        self.assertEqual(status(saved, ['192.168.1.64/32'])['mode'], 'selected')          # rotte vere fuori dalla rete tradotta: vincono
+        self.assertEqual(status(saved, [self.NET, '192.168.1.0/24'])['mode'], 'all')
+        self.assertEqual(status(dict(saved, mode='selected'), ['192.168.2.64/32'])['mode'], 'selected')
+        self.assertEqual(status(dict(saved, subnets='x'), [self.NET])['mode'], 'all')
+        self.assertEqual(status(dict(saved, subnets=''), [self.NET])['mode'], 'all')
+
+    # --- pacchetti veri, in uno spazio di rete privato ------------------------------------------
+    def test_with_real_packets_in_a_private_network_namespace(self):
+        import shutil, subprocess as sp
+        probe = sp.run(['unshare', '-Urn', 'iptables', '-w', '5', '-t', 'nat', '-S'], capture_output=True, text=True) if shutil.which('unshare') and shutil.which('iptables') else None
+        if probe is None or probe.returncode or not os.path.exists('/dev/net/tun'): self.skipTest('iptables, user namespace o /dev/net/tun non disponibili')
+        done = sp.run(['unshare', '-Urn', 'python3', '-c', PACKET_PATH_SCRIPT, str(DIR / 'tailscale_panel_helper.py')], capture_output=True, text=True, timeout=180)
+        if 'PACKET-PATH-SKIP' in done.stdout: self.skipTest(done.stdout.strip())
+        self.assertIn('PACKET-PATH-OK', done.stdout, done.stderr + done.stdout)
 
 
 class DiscoveryTests(unittest.TestCase):

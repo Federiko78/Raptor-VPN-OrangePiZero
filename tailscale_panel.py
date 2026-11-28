@@ -305,6 +305,17 @@ def events_data(path=None, now=None):
                         'total': len(events)}}
 
 
+def translated_routes(settings, actual):
+    """True if the saved mode is "Rete tradotta" and every published route lies inside its translated network."""
+    if settings.get('mode') != 'translated':
+        return False
+    try:
+        net = ipaddress.ip_network(str(settings.get('subnets', '')).strip(), strict=True)
+        return isinstance(net, ipaddress.IPv4Network) and all(ipaddress.ip_network(r, strict=True).subnet_of(net) for r in actual)
+    except (ValueError, TypeError):
+        return False
+
+
 def status_data():
     result = {'backend':'Unavailable', 'tailscale_ip':'-', 'hostname':'-',
               'tailnet':'-', 'error':'', 'version':'-', 'lan':lan_details(),
@@ -349,6 +360,8 @@ def status_data():
                 # Il modo alias non pubblica nessuna rotta: lo ricorda lo stato salvato dopo l'ultima applicazione riuscita.
                 if not (settings.get('mode') == 'alias' and len(settings.get('selected_hosts') or []) == 1):
                     settings['mode'] = 'off'
+            elif translated_routes(settings, actual):
+                settings['mode'] = 'translated'   # subnets e selected_hosts restano quelli salvati
             elif all(r.endswith('/32') for r in actual):
                 settings['mode'] = 'selected'
                 settings['selected_hosts'] = [r.rsplit('/',1)[0] for r in actual]
@@ -616,8 +629,13 @@ DASH = r'''<header class="top"><a class="brand" href="#top"><span class="eye" ro
 <div class="radioopts"><label><input name="routeMode" type="radio" id="routeOff" value="off" checked> [[routes.off]]</label>
 <label><input name="routeMode" type="radio" id="routeAll" value="all"> [[routes.all]]</label>
 <label><input name="routeMode" type="radio" id="routeSelected" value="selected"> [[routes.selected]]</label>
-<label><input name="routeMode" type="radio" id="routeAlias" value="alias"> [[routes.alias]]</label></div>
+<label><input name="routeMode" type="radio" id="routeAlias" value="alias"> [[routes.alias]]</label>
+<label><input name="routeMode" type="radio" id="routeTranslated" value="translated"> [[routes.translated]]</label></div>
 <div id="aliasBox" class="notice hidden"><p>[[routes.alias_help]]</p><p><strong>[[routes.alias_use]]</strong> <span class="value" id="aliasIp">-</span></p></div>
+<div id="transBox" class="hidden"><div class="formgrid">
+<div class="field"><label>[[routes.trans_now]]</label><div class="value" id="transLan">-</div><small>[[routes.trans_now_ip]] <span class="value" id="transLanIp">-</span></small></div>
+<div class="field"><label for="transNet">[[routes.trans_net]]</label><input id="transNet" type="text" spellcheck="false" autocomplete="off" maxlength="18" placeholder="192.168.2.0/24"><small>[[routes.trans_net_help]]</small></div></div>
+<div class="notice"><p>[[routes.trans_help]]</p><p><strong>[[routes.trans_example]]</strong> <span class="value" id="transExample">-</span></p></div></div>
 <div class="field" id="subnetsField"><label for="subnets">[[routes.subnets]]</label><input id="subnets" type="text" spellcheck="false" placeholder="192.168.1.0/24"><small>[[routes.subnets_help]]</small></div>
 <div class="tgl"><div><strong>[[routes.snat]]</strong><span>[[routes.snat_help]]</span></div><input class="switch" id="snat" type="checkbox" aria-label="SNAT"></div>
 <div class="tgl"><div><strong>[[routes.accept]]</strong><span>[[routes.accept_help]]</span></div><input class="switch" id="accept_routes" type="checkbox" aria-label="{{routes.accept}}"></div>
@@ -710,19 +728,47 @@ function S(m){
 function plural(n,key){return T(key+(n===1?'_one':'_other'));}
 const $ = id => document.getElementById(id);
 const boolFields = ['snat','accept_routes','accept_dns','auto_update'];
-const ROUTE_IDS = {off:'routeOff', all:'routeAll', selected:'routeSelected', alias:'routeAlias'};
-function routeMode(){return $('routeAlias').checked?'alias':$('routeAll').checked?'all':$('routeSelected').checked?'selected':'off';}
+const ROUTE_IDS = {off:'routeOff', all:'routeAll', selected:'routeSelected', alias:'routeAlias', translated:'routeTranslated'};
+function routeMode(){return $('routeTranslated').checked?'translated':$('routeAlias').checked?'alias':$('routeAll').checked?'all':$('routeSelected').checked?'selected':'off';}
+function ip4n(t){const m=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(t).trim());if(!m)return null;const p=m.slice(1).map(Number);if(p.some(x=>x>255))return null;return((p[0]*256+p[1])*256+p[2])*256+p[3];}
+function ip4s(n){return[n>>>24,(n>>>16)&255,(n>>>8)&255,n&255].join('.');}
+function maskOf(len){return(0xFFFFFFFF<<(32-len))>>>0;}
+function cidr(t){const m=/^(\S+)\/(\d{1,2})$/.exec(String(t).trim());if(!m)return null;const a=ip4n(m[1]),len=Number(m[2]);if(a===null||len<1||len>30)return null;return{base:(a&maskOf(len))>>>0,len:len};}
+function suggestNet(subnet){
+ const c=cidr(subnet);if(!c||c.len<24)return '';
+ const o=ip4s(c.base).split('.').map(Number);
+ for(let n=2;n<10;n++){if(o[0]===192&&o[1]===168&&o[2]===n)continue;return '192.168.'+n+'.'+o[3]+'/'+c.len;}
+ return '';
+}
+function mapIp(ip){
+ const lan=cidr(detectedSubnet),net=cidr($('transNet').value),a=ip4n(ip);
+ if(!lan||!net||a===null||lan.len!==net.len||((a&maskOf(lan.len))>>>0)!==lan.base)return '';
+ return ip4s((net.base+(a-lan.base))>>>0);
+}
+function transExample(){
+ const pool=[...selectedHosts,...discovered.map(d=>d.ip)];
+ const real=pool.find(ip=>mapIp(ip))||(cidr(detectedSubnet)?ip4s(cidr(detectedSubnet).base+1):'');
+ const mapped=real?mapIp(real):'';
+ return mapped?real+' \u2192 '+mapped:'-';
+}
 function showRouteMode(){
- const alias=routeMode()==='alias';
+ const mode=routeMode(),alias=mode==='alias',trans=mode==='translated';
  $('aliasBox').classList.toggle('hidden',!alias);
- $('subnetsField').classList.toggle('hidden',alias);
+ $('transBox').classList.toggle('hidden',!trans);
+ $('subnetsField').classList.toggle('hidden',alias||trans);
  $('aliasIp').textContent=tsIp4;
+ $('transLan').textContent=detectedSubnet||'-';
+ $('transLanIp').textContent=lanIp;
+ $('transExample').textContent=transExample();
+ renderDevices();
 }
 Object.values(ROUTE_IDS).forEach(id=>{$(id).onchange=showRouteMode;});
+$('transNet').addEventListener('input',()=>{$('transExample').textContent=transExample();renderDevices();});
 let selectedHosts = new Set();
 let discovered = [];
 let initialMode = 'off';
 let tsIp4 = '-';
+let lanIp = '-';
 let detectedSubnet = '';
 let first = true;
 async function refresh(){
@@ -734,7 +780,7 @@ async function refresh(){
   $('tsip').textContent=data.tailscale_ip; $('hostname').textContent=data.hostname;
   tsIp4=(String(data.tailscale_ip||'').split(',').map(x=>x.trim()).find(x=>/^\d{1,3}(\.\d{1,3}){3}$/.test(x)))||'-';
   $('lanip').textContent=data.lan.ip; $('interface').textContent=data.lan.device;
-  detectedSubnet=data.lan.subnet||'';
+  detectedSubnet=data.lan.subnet||'';lanIp=data.lan.ip||'-';
   $('detected').textContent=detectedSubnet||T('info.not_detected');
   $('dhcp').textContent=(data.network && data.network.mode==='static')?T('info.static_ip'):(data.lan.dhcp?S(data.lan.dhcp):T('info.dhcp_unknown'));
   $('gateway').textContent=data.lan.gateway||'-';
@@ -744,8 +790,9 @@ async function refresh(){
   $('forwarding').textContent=data.forwarding?T('info.on'):T('info.off'); $('version').textContent=data.version;
   if(first){
     boolFields.forEach(id=>$(id).checked=!!s[id]);
-    $('subnets').value=s.subnets||data.lan.subnet;
-    initialMode=['off','all','selected','alias'].includes(s.mode)?s.mode:'off';
+    $('subnets').value=s.mode==='translated'?data.lan.subnet:(s.subnets||data.lan.subnet);
+    $('transNet').value=s.mode==='translated'&&s.subnets?s.subnets:suggestNet(data.lan.subnet);
+    initialMode=['off','all','selected','alias','translated'].includes(s.mode)?s.mode:'off';
     $(ROUTE_IDS[initialMode]).checked=true;
     selectedHosts=new Set(Array.isArray(s.selected_hosts)?s.selected_hosts:[]);
     renderDevices();first=false;
@@ -763,14 +810,15 @@ $('settings').addEventListener('submit',async e=>{
  e.preventDefault();$('save').disabled=true;msg(T('routes.applying'),false);
  const payload=Object.fromEntries(boolFields.map(id=>[id,$(id).checked]));
  payload.mode=routeMode();
- payload.subnets=$('subnets').value.trim();payload.selected_hosts=[...selectedHosts];
+ payload.subnets=(payload.mode==='translated'?$('transNet'):$('subnets')).value.trim();payload.selected_hosts=[...selectedHosts];
+ if(payload.mode==='translated' && !payload.subnets){msg(T('routes.trans_need'),true);$('save').disabled=false;return;}
  if(payload.mode==='selected' && !payload.selected_hosts.length){msg(T('routes.pick_one'),true);$('save').disabled=false;return;}
  if(payload.mode==='alias' && payload.selected_hosts.length!==1){msg(T('routes.alias_one'),true);$('save').disabled=false;return;}
  try {const response=await fetch('/api/apply',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(payload)});
  const result=await response.json();if(!response.ok)throw Error(S(result.error)||T('routes.unspecified'));
- const aliasOn=payload.mode==='alias';
+ const aliasOn=payload.mode==='alias',transOn=payload.mode==='translated';
  first=true;await refresh();
- msg(aliasOn?T('routes.applied_alias',{ip:tsIp4}):T('routes.applied'),false);
+ msg(aliasOn?T('routes.applied_alias',{ip:tsIp4}):transOn?T('routes.applied_translated',{lan:detectedSubnet,net:payload.subnets}):T('routes.applied'),false);
  }catch(error){msg(error.message,true)}finally{$('save').disabled=false;}
 });
 function renderDevices(){
@@ -789,7 +837,9 @@ function renderDevices(){
    const title=document.createElement('strong');title.textContent=d.hostname&&d.hostname!=='-'?d.hostname:T('lan.device');
    const address=document.createElement('small');address.textContent=T('lan.ipmac',{ip:d.ip,mac:d.mac||'-'});
    const vendor=document.createElement('small');vendor.textContent=T('lan.vendor',{v:d.vendor||'-'});
-   info.append(title,address,vendor);row.append(check,info);list.append(row);
+   info.append(title,address,vendor);
+   const mapped=routeMode()==='translated'?mapIp(d.ip):'';
+   if(mapped){const via=document.createElement('small');via.className='value';via.textContent=T('lan.mapped',{ip:mapped});info.append(via);}row.append(check,info);list.append(row);
  }
  renderScanMeta();
 }

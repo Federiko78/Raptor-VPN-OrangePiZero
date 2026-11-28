@@ -10,6 +10,12 @@ Mode "alias": no route is published at all. Everything that reaches the Orange P
 own Tailscale address is forwarded (DNAT) to ONE LAN device, which therefore appears
 to the tailnet under the Pi's 100.x address. The LAN address of the device never
 leaves the customer's network, so it cannot clash with the addresses of the remote site.
+
+Mode "translated": the LAN is published under ANOTHER network of the same size (for example
+192.168.1.0/24 seen as 192.168.2.0/24). Packets from the tailnet for 192.168.2.N are rewritten
+(NETMAP for the whole network, DNAT for chosen devices) to 192.168.1.N and masqueraded, so the
+remote site can use addresses that do not clash with its own. The Pi itself is never translated.
+The "subnets" field carries the translated network; "selected_hosts" (optional) the real devices.
 """
 import fcntl
 import ipaddress
@@ -34,7 +40,8 @@ MAX_SELECTED = 64
 RFC1918 = [ipaddress.ip_network(c) for c in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
 BOOLEAN_KEYS = ('snat', 'accept_routes', 'accept_dns', 'auto_update')
 EXPECTED = {'mode', 'subnets', 'selected_hosts', *BOOLEAN_KEYS}
-MODES = ('off', 'all', 'selected', 'alias')
+MODES = ('off', 'all', 'selected', 'alias', 'translated')
+NETMAP_MISSING = 'Whole-network translation is not available on this Orange Pi: choose the devices to translate'
 
 
 def run(argv, timeout=20, check=True):
@@ -55,10 +62,13 @@ def lan_interface():
     return dev
 
 
+def ip_binary():
+    return '/usr/sbin/ip' if os.path.exists('/usr/sbin/ip') else '/usr/bin/ip'
+
+
 def current_lan():
     dev = lan_interface()
-    result = json.loads(run(['/usr/sbin/ip' if os.path.exists('/usr/sbin/ip') else '/usr/bin/ip',
-                             '-j', '-4', 'addr', 'show', 'dev', dev]).stdout)
+    result = json.loads(run([ip_binary(), '-j', '-4', 'addr', 'show', 'dev', dev]).stdout)
     for interface in result:
         for addr in interface.get('addr_info', []):
             if addr.get('family') == 'inet' and addr.get('scope') == 'global':
@@ -89,6 +99,55 @@ def validate_networks(value):
         if str(net) not in valid:
             valid.append(str(net))
     return valid
+
+
+def local_networks():
+    """Networks the Orange Pi is directly connected to (main routing table, default route left out).
+
+    Only a sanity check for the translated network: if the list cannot be read, nothing is excluded.
+    """
+    found = []
+    try:
+        routes = json.loads(run([ip_binary(), '-j', '-4', 'route', 'show']).stdout)
+        for route in routes if isinstance(routes, list) else []:
+            dst = route.get('dst') if isinstance(route, dict) else None
+            if isinstance(dst, str) and dst != 'default':
+                found.append(ipaddress.ip_network(dst, strict=False))
+    except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired):
+        pass
+    return found
+
+
+def validate_translated(value, network):
+    """The one network under which the LAN is published: same size, private, free."""
+    nets = validate_networks(value) if isinstance(value, str) and value.strip() else []
+    if len(nets) != 1:
+        raise ValueError('Enter exactly one translated network (example 192.168.2.0/24)')
+    trans = ipaddress.IPv4Network(nets[0])
+    if trans.prefixlen != network.prefixlen:
+        raise ValueError('The translated network must be the same size as the LAN network (/%d)' % network.prefixlen)
+    if trans.overlaps(network):
+        raise ValueError('The translated network must be different from the LAN network')
+    for used in local_networks():
+        if trans.overlaps(used):
+            raise ValueError('The translated network overlaps a network already used by this Orange Pi: %s' % used)
+    return trans
+
+
+def map_address(ip, lan, trans):
+    """The address under which the LAN device `ip` is seen through the translated network."""
+    return str(ipaddress.IPv4Address(int(trans.network_address) + int(ipaddress.IPv4Address(ip)) - int(lan.network_address)))
+
+
+def translation(policy, lan, local):
+    """What the firewall steps need for the translated mode; None if the policy is not for this LAN or not translated."""
+    if not isinstance(policy, dict) or policy.get('mode') != 'translated' or policy.get('lan') != lan:
+        return None
+    try:
+        nets = validate_networks(policy.get('subnets', ''))
+    except ValueError:
+        return None
+    return {'net': nets[0], 'lan': lan, 'local': local} if len(nets) == 1 else None
 
 
 def validate_selected(values, local, network):
@@ -128,16 +187,21 @@ def validate(data):
     if not isinstance(raw_hosts, list) or len(raw_hosts) > MAX_SELECTED or not all(
             isinstance(v, str) and len(v) <= 15 for v in raw_hosts):
         raise ValueError('Invalid device list (maximum 64 IPs)')
-    selected = validate_selected(raw_hosts, local, net) if data['mode'] in ('selected', 'alias') else []
+    selected = validate_selected(raw_hosts, local, net) if data['mode'] in ('selected', 'alias', 'translated') else []
     if data['mode'] == 'all' and not networks:
         raise ValueError('Enter a subnet to publish')
     if data['mode'] == 'selected' and not selected:
         raise ValueError('Select at least one device')
     if data['mode'] == 'alias' and len(selected) != 1:
         raise ValueError('Choose exactly one device for the Tailscale alias')
+    if data['mode'] == 'translated':
+        # No device chosen = the whole LAN is translated; devices chosen = only those.
+        networks = [str(validate_translated(data['subnets'], net))]
     # Scan/selected mode operates only on the directly connected local subnet.
+    # "lan" and "local" describe the LAN seen now; only "lan" of the translated mode is saved.
     return {'mode': data['mode'], 'subnets': ', '.join(networks),
-            'selected_hosts': selected, **{key:data[key] for key in BOOLEAN_KEYS}}, dev
+            'selected_hosts': selected, **{key:data[key] for key in BOOLEAN_KEYS},
+            'lan': str(net), 'local': str(local)}, dev
 
 
 def read_policy():
@@ -162,7 +226,10 @@ def save_policy(data):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as out:
             os.fchmod(out.fileno(), 0o600)
-            json.dump({key:data[key] for key in ('mode','subnets','selected_hosts')}, out)
+            saved = {key:data[key] for key in ('mode','subnets','selected_hosts')}
+            if data['mode'] == 'translated':
+                saved['lan'] = data.get('lan', '')  # the translation only ever applies to the LAN it was set up on
+            json.dump(saved, out)
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp, POLICY)
@@ -205,12 +272,17 @@ def guard_ip6(interface):
         raise RuntimeError('IPv6 protection not installed')
 
 
-def apply_guard(mode, selected, interface, subnets=''):
+def apply_guard(mode, selected, interface, subnets='', lan=''):
     """Build new mangle chain and swap its jump without a fail-open window.
 
     Both IPv4 and IPv6 are controlled before filter/FORWARD, regardless of
     changes Tailscale makes to ts-forward. Only IPv4 routes are configurable;
     IPv6 tailnet -> LAN forwarding is always blocked.
+
+    Mode "translated": the destination is checked AFTER the translation (mangle FORWARD
+    comes after the nat PREROUTING), so the real LAN addresses are listed, and only for
+    packets that really went through the translation (conntrack state DNAT): a packet for a
+    real LAN address that was not translated (for example the Pi's own) never gets through.
     """
     guard_ip6(interface)
     attached = fwd_rules()
@@ -243,6 +315,10 @@ def apply_guard(mode, selected, interface, subnets=''):
     elif mode == 'all':
         for prefix in validate_networks(subnets):
             ipt('-A', target, '-d', prefix, '-j', 'RETURN')
+    elif mode == 'translated':
+        reachable = [address + '/32' for address in selected] or validate_networks(lan)[:1]
+        for destination in reachable:
+            ipt('-A', target, '-d', destination, '-m', 'conntrack', '--ctstate', 'DNAT', '-j', 'RETURN')
     elif mode != 'off':
         raise ValueError('Unsupported firewall mode')
     ipt('-A', target, '-j', 'DROP')
@@ -295,12 +371,54 @@ def apply_alias(host, interface):
     "snat" setting says, because the device does not know the 100.x network.
     """
     ipaddress.IPv4Address(host)
+    install_nat([['-m', 'addrtype', '--dst-type', 'LOCAL', '-j', 'DNAT', '--to-destination', host]],
+                [['-s', TAILNET, '-d', host + '/32', '-j', 'MASQUERADE']], interface)
+
+
+def install_nat(pre_rules, post_rules, interface):
+    """Fill the two panel nat chains, and only then hook them in (alias and translated mode share them)."""
     alias_chain(CHAIN_ALIAS_PRE)
-    ipt_nat('-A', CHAIN_ALIAS_PRE, '-m', 'addrtype', '--dst-type', 'LOCAL', '-j', 'DNAT', '--to-destination', host)
+    for rule in pre_rules:
+        try:
+            ipt_nat('-A', CHAIN_ALIAS_PRE, *rule)
+        except RuntimeError:
+            if 'NETMAP' in rule:  # the kernel of this board has no NETMAP: leave nothing half done
+                clear_alias()
+                raise RuntimeError(NETMAP_MISSING)
+            raise
     alias_chain(CHAIN_ALIAS_POST)
-    ipt_nat('-A', CHAIN_ALIAS_POST, '-s', TAILNET, '-d', host + '/32', '-j', 'MASQUERADE')
+    for rule in post_rules:
+        ipt_nat('-A', CHAIN_ALIAS_POST, *rule)
     alias_jump('PREROUTING', ['-i', 'tailscale0', '-j', CHAIN_ALIAS_PRE])
     alias_jump('POSTROUTING', ['-o', interface, '-j', CHAIN_ALIAS_POST])
+
+
+def apply_translated(trans, hosts, interface):
+    """Show the LAN (or only `hosts`) to the tailnet under the translated network.
+
+    trans = {'net': translated network, 'lan': the real network, 'local': the Pi's own LAN address}.
+    Called AFTER the mangle guard. The MASQUERADE makes the devices answer to the Pi whatever the
+    "snat" setting says, because they do not know the 100.x network.
+    """
+    lan = ipaddress.IPv4Network(trans['lan'], strict=True)
+    net = ipaddress.IPv4Network(trans['net'], strict=True)
+    local = ipaddress.IPv4Address(trans['local'])
+    if net.prefixlen != lan.prefixlen or net.overlaps(lan) or local not in lan:
+        raise ValueError('Invalid translated network')
+    if not isinstance(hosts, list) or any(ipaddress.IPv4Address(host) not in lan for host in hosts):
+        raise ValueError('Invalid device address')
+    pre, post = [], []
+    if hosts:
+        for host in hosts:
+            pre.append(['-d', map_address(host, lan, net) + '/32', '-j', 'DNAT', '--to-destination', host])
+            post.append(['-s', TAILNET, '-d', host + '/32', '-j', 'MASQUERADE'])
+    else:
+        # The Pi itself and the network/broadcast address are never translated: untouched, the guard drops them.
+        for special in (local, lan.network_address, lan.broadcast_address):
+            pre.append(['-d', map_address(str(special), lan, net) + '/32', '-j', 'RETURN'])
+        pre.append(['-d', str(net), '-j', 'NETMAP', '--to', str(lan)])
+        post.append(['-s', TAILNET, '-d', str(lan), '-j', 'MASQUERADE'])
+    install_nat(pre, post, interface)
 
 
 def clear_alias():
@@ -314,9 +432,11 @@ def clear_alias():
             ipt_nat('-X', chain)
 
 
-def apply_nat(mode, selected, interface):
+def apply_nat(mode, selected, interface, trans=None):
     if mode == 'alias' and len(selected) == 1:
         apply_alias(selected[0], interface)
+    elif mode == 'translated' and trans:
+        apply_translated(trans, selected, interface)
     else:
         clear_alias()
 
@@ -326,6 +446,10 @@ def active_routes(data):
         return ''
     if data['mode'] == 'selected':
         return ','.join(ip+'/32' for ip in data['selected_hosts'])
+    if data['mode'] == 'translated' and data['selected_hosts']:
+        lan = ipaddress.IPv4Network(data['lan'])
+        net = ipaddress.IPv4Network(validate_networks(data['subnets'])[0])
+        return ','.join(map_address(ip, lan, net) + '/32' for ip in data['selected_hosts'])
     return ','.join(validate_networks(data['subnets']))
 
 
@@ -359,7 +483,7 @@ def main():
             fresh = not os.path.exists(POLICY)
             previous = read_policy()
             dev = lan_interface()
-            mode, hosts = 'off', []
+            mode, hosts, trans, lan_text = 'off', [], None, ''
             # Apply a DENY guard immediately, BEFORE waiting for DHCP.
             apply_guard('off', [], dev)
             # At boot IPv4 may not yet be leased; allow up to 15 s to restore
@@ -377,15 +501,24 @@ def main():
                     elif previous.get('mode') == 'all':
                         routes = validate_networks(previous.get('subnets',''))
                         mode = 'all' if any(local in ipaddress.IPv4Network(route) for route in routes) else 'off'
+                    elif previous.get('mode') == 'translated':
+                        # Only on the very LAN it was set up on, and only if everything still fits.
+                        trans = translation(previous, str(network), str(local))
+                        if trans is not None:
+                            validate_translated(trans['net'], network)
+                            saved = previous.get('selected_hosts', [])
+                            hosts = validate_selected(saved, local, network) if saved else []
+                            if len(hosts) == len(saved):
+                                mode, lan_text = 'translated', str(network)
                     break
                 except (ValueError, TypeError, RuntimeError):
                     if attempt < 15: time.sleep(1)
             if mode != 'off':
-                apply_guard(mode, hosts, dev, previous.get('subnets', ''))
+                apply_guard(mode, hosts, dev, previous.get('subnets', ''), lan_text)
             try:
-                apply_nat(mode, hosts if mode == 'alias' else [], dev)
-            except (RuntimeError, subprocess.TimeoutExpired, OSError):
-                if mode == 'alias':  # without the forward the alias would silently do nothing: stay closed
+                apply_nat(mode, hosts if mode in ('alias', 'translated') else [], dev, trans if mode == 'translated' else None)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError, ValueError):
+                if mode in ('alias', 'translated'):  # without the forward it would silently do nothing: stay closed
                     apply_guard('off', [], dev)
                     mode = 'off'
             if fresh:  # Capture previously running R1.2 policy before reboot.
@@ -398,14 +531,14 @@ def main():
         # matching boot guard policy.
         save_policy(data)
         try:
-            apply_guard(data['mode'], data['selected_hosts'], dev, data['subnets'])
-            apply_nat(data['mode'], data['selected_hosts'], dev)
+            apply_guard(data['mode'], data['selected_hosts'], dev, data['subnets'], data['lan'])
+            apply_nat(data['mode'], data['selected_hosts'], dev, translation(data, data['lan'], data['local']))
             apply_tailscale(data)
         except (RuntimeError, subprocess.TimeoutExpired, OSError, ValueError) as err:
             try:
                 save_policy(previous)
-                apply_guard(previous.get('mode','off'), previous.get('selected_hosts',[]), dev, previous.get('subnets',''))
-                apply_nat(previous.get('mode','off'), previous.get('selected_hosts',[]), dev)
+                apply_guard(previous.get('mode','off'), previous.get('selected_hosts',[]), dev, previous.get('subnets',''), previous.get('lan',''))
+                apply_nat(previous.get('mode','off'), previous.get('selected_hosts',[]), dev, translation(previous, data['lan'], data['local']))
                 apply_tailscale({**data, **previous})
             except Exception:
                 pass  # Prefer an existing restrictive guard to removing it.

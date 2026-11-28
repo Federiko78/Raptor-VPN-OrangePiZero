@@ -98,6 +98,15 @@
   "routes.alias_use": "Indirizzo da aprire dal PC remoto:",
   "routes.alias_one": "In modalità alias scegli esattamente un dispositivo dalla scansione LAN.",
   "routes.applied_alias": "Alias attivo. Dal PC remoto apri {ip}. Nessuna rotta da approvare.",
+  "routes.translated": "Rete tradotta (la LAN con un’altra numerazione)",
+  "routes.trans_now": "Rete attuale",
+  "routes.trans_now_ip": "Indirizzo IP attuale dell’Orange Pi:",
+  "routes.trans_net": "Rete tradotta",
+  "routes.trans_net_help": "Della stessa dimensione della rete attuale e libera in entrambe le sedi (per esempio 192.168.2.x, 3.x o 4.x).",
+  "routes.trans_help": "L’Orange Pi pubblica la LAN con la numerazione tradotta e converte gli indirizzi nei due sensi: un dispositivo che sulla rete attuale finisce con .64 si raggiunge da Tailscale con lo stesso .64 sulla rete tradotta. Sulla LAN non cambia nulla. L’Orange Pi in sé non è raggiungibile dalla rete tradotta. Scegli i dispositivi qui sotto per pubblicare solo quelli; se non ne scegli nessuno viene tradotta tutta la rete.",
+  "routes.trans_example": "Esempio:",
+  "routes.trans_need": "Scrivi la rete tradotta (esempio 192.168.2.0/24).",
+  "routes.applied_translated": "Rete tradotta attiva: {lan} viene pubblicata come {net}. Approva la rotta nel pannello di amministrazione Tailscale.",
   "routes.unspecified": "Errore non specificato",
   "routes.applied": "Impostazioni applicate. Controlla le rotte nel pannello Tailscale.",
   "info.title": "Stato e informazioni",
@@ -128,6 +137,7 @@
   "lan.device": "Dispositivo LAN",
   "lan.vendor": "Produttore: {v}",
   "lan.ipmac": "IP {ip} · MAC {mac}",
+  "lan.mapped": "Da Tailscale: {ip}",
   "lan.count": "{found} dispositivi rilevati · {sel} selezionati",
   "lan.scanning": "Scansione in corso...",
   "lan.failed": "Scansione non riuscita",
@@ -394,6 +404,12 @@
   "Invalid port fields.": "Campi porta non validi.",
   "Port error": "Errore porta",
   "Port management not available": "Gestione della porta non disponibile",
-  "Choose exactly one device for the Tailscale alias": "Per l’alias Tailscale scegli esattamente un dispositivo."
+  "Choose exactly one device for the Tailscale alias": "Per l’alias Tailscale scegli esattamente un dispositivo.",
+  "Enter exactly one translated network (example 192.168.2.0/24)": "Scrivi una sola rete tradotta (esempio 192.168.2.0/24).",
+  "The translated network must be the same size as the LAN network (/%d)": "La rete tradotta deve avere la stessa dimensione della rete attuale (/%d).",
+  "The translated network must be different from the LAN network": "La rete tradotta deve essere diversa dalla rete attuale.",
+  "The translated network overlaps a network already used by this Orange Pi: %s": "La rete tradotta si sovrappone a una rete già usata da questa Orange Pi: %s",
+  "Whole-network translation is not available on this Orange Pi: choose the devices to translate": "La traduzione di tutta la rete non è disponibile su questa Orange Pi: scegli i dispositivi da tradurre.",
+  "Invalid translated network": "Rete tradotta non valida."
  }
 }

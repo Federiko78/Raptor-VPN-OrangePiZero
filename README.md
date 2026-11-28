@@ -11,7 +11,7 @@ L'installatore collega la scheda alla LAN del cliente, apre il pannello dal brow
 - Web UI HTTPS sulla porta **8443** (si cambia dal pannello, vedi [`PORTA_PANNELLO.md`](PORTA_PANNELLO.md)), raggiungibile **solo dalla LAN Ethernet** (socket systemd legato a `end0`, mai su `tailscale0` né Wi-Fi).
 - Accesso con password (PBKDF2-SHA256), sessioni con CSRF, limite ai tentativi di login.
 - **LAN Device Discovery**: scanner ARP (IP, MAC, produttore, hostname) della sola rete locale.
-- Pubblicazione rotte Tailscale in quattro modalità: nessuna LAN, intera subnet, **solo dispositivi selezionati (/32)** e **alias Tailscale** (un solo dispositivo visto con l'indirizzo Tailscale della scheda, senza pubblicare nessuna rotta: utile quando gli indirizzi delle due sedi potrebbero coincidere, vedi [`ALIAS_DISPOSITIVO.md`](ALIAS_DISPOSITIVO.md)).
+- Pubblicazione rotte Tailscale in cinque modalità: nessuna LAN, intera subnet, **solo dispositivi selezionati (/32)** e **alias Tailscale** (un solo dispositivo visto con l'indirizzo Tailscale della scheda, senza pubblicare nessuna rotta: utile quando gli indirizzi delle due sedi potrebbero coincidere, vedi [`ALIAS_DISPOSITIVO.md`](ALIAS_DISPOSITIVO.md)) e **rete tradotta** (la rete del cliente vista con un'altra numerazione, per esempio `192.168.1.x` come `192.168.2.x`, quando le due sedi usano gli stessi indirizzi: vedi [`RETE_TRADOTTA.md`](RETE_TRADOTTA.md)).
 - **Guard di forwarding** `iptables -t mangle` che parte prima di `tailscaled` e blocca per default `tailscale0 → LAN`.
 - DHCP o IP statico via Netplan, con **conferma entro 150 s** e rollback automatico.
 - Helper root con schema JSON fisso, nessuna shell; `sudo` limitato a cinque programmi, senza argomenti.
